@@ -9,7 +9,7 @@ Zaroori Baat V2 scans incoming Slack message events, scores actionability, and r
 ### Run locally
 
 ```bash
-cd ZAROORI_BAAT_V2
+cd /Users/shalinikyanam/Documents/Training/MasteringAgenticAI/SlackProject
 python3 app.py
 ```
 
@@ -24,6 +24,30 @@ https://YOUR_PUBLIC_HOST/webhooks/slack
 ```
 
 Subscribe to bot events such as `message.channels`, `message.groups`, or `message.im` according to the channels the bot is allowed to access. Set `SLACK_SIGNING_SECRET` in the environment before production use. The endpoint supports Slack URL verification and verifies signed requests when the secret is configured. Set `SLACK_CHANNEL_IDS` to a comma-separated list to scan multiple channels with one Sync Slack action.
+
+### Add every new Slack channel
+
+For each new channel that Zaroori Baat should scan:
+
+1. Open the channel in Slack and invite the Zaroori Baat bot/app:
+
+   ```text
+   /invite @Zaroori Baat V2
+   ```
+
+   Use the bot's actual Slack display name if it differs. The bot must be a member of private channels.
+2. Copy the channel ID from the channel details. Use the ID, not the channel name.
+3. Add the channel ID to `.env`, keeping existing channel IDs separated by commas:
+
+   ```env
+   SLACK_BOT_TOKEN=xoxb-your-token
+   SLACK_CHANNEL_IDS=C012OLDCHANNEL,C012NEWCHANNEL
+   SLACK_SIGNING_SECRET=your-signing-secret
+   ```
+
+4. Restart the local server so it reloads `.env`, then select **Sync Slack** in the app.
+
+If a channel is not included in `SLACK_CHANNEL_IDS`, history sync will not scan it. If Slack returns `not_in_channel`, invite the bot to that channel and try again.
 
 ### Design boundary
 
