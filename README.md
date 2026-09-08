@@ -1,10 +1,10 @@
-# Zaroori Baat V2
+# Zaroori Baat Slack
 
 ## Slack Signal Desk
 
-Zaroori Baat V2 scans incoming Slack message events, scores actionability, and ranks the messages most likely to need a response, owner, or decision.
+Zaroori Baat Slack scans incoming Slack message events, scores actionability, and ranks the messages most likely to need a response, owner, or decision.
 
-![Zaroori Baat V2 architecture](zaroori-baat-v2-architecture.svg)
+![Zaroori Baat Slack architecture](zaroori-baat-slack-architecture.svg)
 
 ### Run locally
 
@@ -32,7 +32,7 @@ For each new channel that Zaroori Baat should scan:
 1. Open the channel in Slack and invite the Zaroori Baat bot/app:
 
    ```text
-   /invite @Zaroori Baat V2
+   /invite @Zaroori Baat Slack
    ```
 
    Use the bot's actual Slack display name if it differs. The bot must be a member of private channels.

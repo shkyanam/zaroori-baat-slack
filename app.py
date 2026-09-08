@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).parent
-DATABASE_PATH = ROOT / "zaroori_baat_v2.sqlite3"
+DATABASE_PATH = ROOT / "zaroori_baat_slack.sqlite3"
 
 
 def load_local_env() -> None:
@@ -33,7 +33,7 @@ def load_local_env() -> None:
 
 
 load_local_env()
-PORT = int(os.environ.get("ZAROORI_BAAT_V2_PORT", "8001"))
+PORT = int(os.environ.get("ZAROORI_BAAT_SLACK_PORT", "8001"))
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
@@ -240,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path == "/health":
-            self.send_json({"status": "ok", "service": "zaroori-baat-v2"})
+            self.send_json({"status": "ok", "service": "zaroori-baat-slack"})
         elif path == "/api/messages":
             self.send_json({"messages": list_messages()})
         elif path == "/webhooks/slack":
@@ -301,7 +301,7 @@ def main() -> None:
     initialize_database()
     seed_demo()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Zaroori Baat V2 running at http://127.0.0.1:{PORT}")
+    print(f"Zaroori Baat Slack running at http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

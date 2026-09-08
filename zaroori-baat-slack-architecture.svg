@@ -9,7 +9,7 @@
     </style>
   </defs>
   <rect width="1600" height="1030" fill="#fff"/>
-  <text x="800" y="58" class="title" text-anchor="middle">Zaroori Baat V2</text>
+  <text x="800" y="58" class="title" text-anchor="middle">Zaroori Baat Slack</text>
   <text x="800" y="91" class="subtitle" text-anchor="middle">Slack Signal Desk: from message volume to clear action</text>
 
   <rect x="28" y="125" width="270" height="205" rx="12" class="box" filter="url(#shadow)"/>
@@ -26,7 +26,7 @@
 
   <rect x="320" y="125" width="900" height="655" rx="15" fill="#fff" stroke="#274c59" stroke-width="3" filter="url(#shadow)"/>
   <path d="M320 125 H820 Q840 125 840 145 V165 H320 Z" fill="url(#navy)"/>
-  <text x="350" y="153" class="section">V2 Agentic Architecture</text>
+  <text x="350" y="153" class="section">Slack Agentic Architecture</text>
 
   <rect x="350" y="205" width="205" height="150" rx="12" class="source"/><text x="452" y="245" class="center">Slack Workspace</text><text x="452" y="280" class="small" text-anchor="middle">#all-capacity</text><text x="452" y="306" class="small" text-anchor="middle">Public / private channels</text><text x="452" y="332" class="small" text-anchor="middle">Direct mentions</text>
   <rect x="600" y="205" width="205" height="150" rx="12" class="source"/><text x="702" y="245" class="center">Ingestion Paths</text><text x="702" y="280" class="small" text-anchor="middle">Events API</text><text x="702" y="306" class="small" text-anchor="middle">Sync Slack history</text><text x="702" y="332" class="small" text-anchor="middle">Mock test input</text>
