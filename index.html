@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zaroori Baat V2 | Slack Signal Desk</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar"><div><p class="eyebrow">SLACK SIGNAL DESK / V2</p><h1>Zaroori Baat</h1><p class="tagline">Find the messages that need action.</p></div><div class="connection"><i></i><span id="service-status">Slack connector ready</span></div></header>
+    <section class="hero"><div><p class="eyebrow">ACTION QUEUE</p><h2>Less scrolling.<br><em>Better decisions.</em></h2><p class="hero-copy">A ranked view of Slack messages that deserve a response, an owner, or a decision.</p></div><div class="summary"><div><strong id="high-count">0</strong><span>High priority</span></div><div><strong id="pending-count">0</strong><span>Pending action</span></div><div><strong id="total-count">0</strong><span>Messages scanned</span></div></div></section>
+    <section class="queue-section"><div class="section-head"><div><p class="eyebrow">RANKED MESSAGES</p><h2>What needs attention</h2></div><div class="tools"><button id="sync-button" type="button">Sync Slack <span>↻</span></button><button id="refresh-button" type="button">Refresh</button><button id="demo-button" type="button">Add test message <span>+</span></button></div></div><div id="queue" class="queue"></div></section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
