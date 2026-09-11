@@ -53,6 +53,46 @@ If a channel is not included in `SLACK_CHANNEL_IDS`, history sync will not scan 
 
 This MVP processes events delivered to the Slack app. It does not scrape Slack's UI or pull private history without the required Slack scopes. The queue is connector-independent, so mock messages can be used for evaluation.
 
+### Message classifications
+
+Every message is assigned one classification: **FYI**, **Action Required**, **Question**, **Incident**, **Escalation**, **Approval Request**, or **Decision Needed**. The web UI provides a tab for each classification, with counts and filtered messages.
+
+### Context enrichment
+
+Messages received through the Slack webhook or **Sync Slack** are enriched before they appear in the queue. The enrichment agent uses each Slack message plus related messages from the locally synced Slack history as its input, checks mocked ADO, build history, the incident system, related PRs, and previous discussions, then presents the findings and a suggested response on the message card. Use **Refresh context** to rerun the enrichment.
+
+To enable LLM synthesis with Nebius Token Factory, set `NEBIUS_CONTEXT_ENABLED=true`, `NEBIUS_API_KEY`, and `NEBIUS_MODEL` in the environment. The default base URL is `https://api.tokenfactory.nebius.com/v1`; set `NEBIUS_BASE_URL` to a different Nebius endpoint when needed. `LLM_*` equivalents are also supported. The default is disabled so Slack content is not sent externally until explicitly enabled. The app sends the current Slack message, locally related Slack messages, and mocked system findings to `/v1/chat/completions`, then validates the JSON response; keep the API key out of project files.
+
+Example:
+
+```bash
+export NEBIUS_API_KEY='your-key'
+export NEBIUS_MODEL='your-enabled-model'
+export NEBIUS_CONTEXT_ENABLED=true
+python3 app.py
+```
+
+### Action extraction
+
+Each incoming Slack message is also processed by the Action Extraction Agent. It combines the message with related Slack history and extracts **Tasks**, **Follow-ups**, **Risks**, and **Decisions**. Each extracted item includes an owner and due date when explicitly present, plus its Slack thread or channel source. The action results are shown on the message card and are stored separately from the context briefing. If the LLM is unavailable, the app uses a deterministic fallback and does not invent missing owners or dates.
+
+### Decision memory
+
+The Decision Memory Agent records decisions that appear to have been made, including the chosen option, alternatives considered, participants, date, rationale, confidence, and source messages. It combines the current Slack message with related local Slack history, so a decision can be reconstructed when its context is spread across a thread. Open questions and suggestions are not stored as decisions. If the LLM is unavailable, a deterministic fallback captures only explicit decision language.
+
+### Mem0 semantic memory
+
+The app can sync extracted decisions to hosted Mem0 for semantic, cross-message retrieval. SQLite remains the local audit source. Add a Mem0 Platform API key to `.env`, then enable it:
+
+```env
+MEM0_ENABLED=true
+MEM0_API_KEY=your-mem0-api-key
+MEM0_BASE_URL=https://api.mem0.ai
+MEM0_USER_ID=zaroori-baat-workspace
+```
+
+New decisions are written to Mem0 automatically. Use **Sync saved decisions** to backfill decisions already stored locally, and use **Ask what the team decided** to search them. If Mem0 is disabled or unavailable, the UI falls back to local SQLite decision memory. The integration uses Mem0's hosted add/search API; the Mem0 key is separate from the Nebius key.
+
 ### Priority model
 
 - **High:** blocker, incident, deadline, urgent request, or explicit action with a near-term time.
