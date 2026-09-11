@@ -7,6 +7,15 @@ const memorySearchButton = document.querySelector('#memory-search-button');
 const memorySyncButton = document.querySelector('#memory-sync-button');
 const memoryStatus = document.querySelector('#memory-status');
 const memoryResults = document.querySelector('#memory-results');
+const observabilityRefreshButton = document.querySelector('#observability-refresh-button');
+const observabilityWorkflowStatus = document.querySelector('#observability-workflow-status');
+const observabilityLangsmithStatus = document.querySelector('#observability-langsmith-status');
+const observabilityTotalRuns = document.querySelector('#observability-total-runs');
+const observabilityCompletedRuns = document.querySelector('#observability-completed-runs');
+const observabilityFailedRuns = document.querySelector('#observability-failed-runs');
+const observabilityAverageDuration = document.querySelector('#observability-average-duration');
+const observabilityRuns = document.querySelector('#observability-runs');
+const observabilityClassifications = document.querySelector('#observability-classifications');
 const labels = { high: 'High priority', medium: 'Medium priority', low: 'Low priority' };
 const classificationTabs = document.querySelector('#classification-tabs');
 const classifications = ['FYI', 'Action Required', 'Question', 'Incident', 'Escalation', 'Approval Request', 'Decision Needed'];
@@ -87,6 +96,31 @@ function renderMemorySearch(result) {
   }).join('');
   memoryResults.innerHTML = `${answer}${rows || '<p class="action-empty">No matching stored decision was found.</p>'}`;
 }
+function renderObservability(summary) {
+  const workflow = summary.workflow || {};
+  const langsmith = summary.langsmith || {};
+  const metrics = summary.metrics || {};
+  observabilityWorkflowStatus.textContent = `LangGraph · ${escapeHtml(workflow.checkpointer || 'unknown')} checkpoints`;
+  observabilityWorkflowStatus.className = 'status-pill healthy';
+  observabilityLangsmithStatus.textContent = langsmith.active
+    ? `LangSmith connected · ${escapeHtml(langsmith.project || 'default')}`
+    : 'LangSmith not configured';
+  observabilityLangsmithStatus.className = `status-pill ${langsmith.active ? 'healthy' : 'inactive'}`;
+  observabilityTotalRuns.textContent = metrics.total_runs || 0;
+  observabilityCompletedRuns.textContent = metrics.completed_runs || 0;
+  observabilityFailedRuns.textContent = metrics.failed_runs || 0;
+  observabilityAverageDuration.textContent = `${metrics.average_duration_ms || 0} ms`;
+  const runs = Array.isArray(summary.recent_runs) ? summary.recent_runs : [];
+  observabilityRuns.innerHTML = runs.length ? runs.map((run) => `<article class="observability-run"><div><strong>${escapeHtml(run.classification || 'Processing')}</strong><span class="run-status ${escapeHtml(run.status || '')}">${escapeHtml(run.status || 'unknown')}</span></div><p>${escapeHtml(run.channel || 'Slack')} · ${escapeHtml(String(run.duration_ms ?? '—'))} ms</p><small>${escapeHtml(run.run_id || '')}</small>${run.error ? `<em>${escapeHtml(run.error)}</em>` : ''}</article>`).join('') : '<p class="action-empty">No workflow runs recorded yet.</p>';
+  const classifications = metrics.classifications || {};
+  const classificationRows = Object.entries(classifications).map(([name, count]) => `<div class="classification-row"><span>${escapeHtml(name)}</span><strong>${escapeHtml(String(count))}</strong></div>`).join('');
+  observabilityClassifications.innerHTML = classificationRows || '<p class="action-empty">No classifications recorded yet.</p>';
+}
+async function loadObservability() {
+  const response = await fetch('/api/observability/summary');
+  if (!response.ok) throw new Error();
+  renderObservability(await response.json());
+}
 function updateTabs() {
   document.querySelector('#count-all').textContent = messages.length;
   classifications.forEach((classification) => {
@@ -121,7 +155,7 @@ queue.addEventListener('click', async (event) => {
   if (contextButton) {
     contextButton.disabled = true;
     const response = await fetch(`/api/messages/${contextButton.dataset.enrichId}/context`, { method: 'POST' });
-    if (response.ok) { await load(); notify('Context refreshed'); }
+    if (response.ok) { await load(); await loadObservability(); notify('Context refreshed'); }
     contextButton.disabled = false;
     return;
   }
@@ -130,8 +164,9 @@ queue.addEventListener('click', async (event) => {
   const response = await fetch(`/api/messages/${button.dataset.id}/decision`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ decision: button.dataset.decision }) });
   if (response.ok) { await load(); notify('Decision recorded'); }
 });
-refreshButton.addEventListener('click', async () => { refreshButton.disabled = true; try { await load(); notify('Queue refreshed'); } catch { notify('Unable to refresh messages'); } finally { refreshButton.disabled = false; } });
-syncButton.addEventListener('click', async () => { syncButton.disabled = true; const response = await fetch('/api/slack/sync', { method:'POST' }); syncButton.disabled = false; if (!response.ok) { notify('Add Slack token and channel ID first'); return; } await load(); notify('Slack messages synced'); });
+refreshButton.addEventListener('click', async () => { refreshButton.disabled = true; try { await load(); await loadObservability(); notify('Queue refreshed'); } catch { notify('Unable to refresh messages'); } finally { refreshButton.disabled = false; } });
+observabilityRefreshButton.addEventListener('click', async () => { observabilityRefreshButton.disabled = true; try { await loadObservability(); notify('Observability refreshed'); } catch { notify('Unable to refresh observability'); } finally { observabilityRefreshButton.disabled = false; } });
+syncButton.addEventListener('click', async () => { syncButton.disabled = true; const response = await fetch('/api/slack/sync', { method:'POST' }); syncButton.disabled = false; if (!response.ok) { notify('Add Slack token and channel ID first'); return; } await load(); await loadObservability(); notify('Slack messages synced'); });
 async function searchMemory() {
   const query = memoryQuery.value.trim();
   if (!query) { memoryStatus.textContent = 'Enter a question to search decision memory.'; memoryResults.innerHTML = ''; return; }
@@ -161,3 +196,4 @@ memorySyncButton.addEventListener('click', async () => {
   finally { memorySyncButton.disabled = false; }
 });
 load().catch(() => { document.querySelector('#service-status').textContent = 'Connector unavailable'; });
+loadObservability().catch(() => { observabilityLangsmithStatus.textContent = 'Observability unavailable'; observabilityLangsmithStatus.className = 'status-pill inactive'; });

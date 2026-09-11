@@ -6,15 +6,21 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+
+from langsmith import traceable
+from langgraph.graph import END, START, StateGraph
 
 ROOT = Path(__file__).parent
 DATABASE_PATH = ROOT / "zaroori_baat_slack.sqlite3"
@@ -33,6 +39,7 @@ def load_local_env() -> None:
 
 
 load_local_env()
+HOST = os.environ.get("ZAROORI_BAAT_SLACK_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ZAROORI_BAAT_SLACK_PORT", "8001"))
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
@@ -60,6 +67,21 @@ MEM0_BASE_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
 MEM0_USER_ID = os.environ.get("MEM0_USER_ID", "zaroori-baat-workspace")
 MEM0_ENABLED = os.environ.get("MEM0_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 MEM0_MAX_RESULTS = int(os.environ.get("MEM0_MAX_RESULTS", "8"))
+LANGGRAPH_CHECKPOINTER = os.environ.get("LANGGRAPH_CHECKPOINTER", "sqlite").lower()
+LANGGRAPH_CHECKPOINT_PATH = Path(
+    os.environ.get("LANGGRAPH_CHECKPOINT_PATH", str(ROOT / "zaroori_baat_langgraph_checkpoints.sqlite3"))
+)
+LANGGRAPH_POSTGRES_URI = os.environ.get("LANGGRAPH_POSTGRES_URI", "")
+LANGSMITH_TRACING = os.environ.get("LANGSMITH_TRACING", "false").lower() in {"1", "true", "yes", "on"}
+LANGSMITH_API_KEY = os.environ.get("LANGSMITH_API_KEY", "")
+LANGSMITH_PROJECT = os.environ.get("LANGSMITH_PROJECT", "zaroori-baat-slack")
+LANGSMITH_ENDPOINT = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+LANGSMITH_CAPTURE_CONTENT = os.environ.get("LANGSMITH_CAPTURE_CONTENT", "false").lower() in {
+    "1", "true", "yes", "on"
+}
+if not LANGSMITH_CAPTURE_CONTENT:
+    os.environ.setdefault("LANGSMITH_HIDE_INPUTS", "true")
+    os.environ.setdefault("LANGSMITH_HIDE_OUTPUTS", "true")
 
 
 @dataclass
@@ -70,6 +92,128 @@ class PriorityResult:
     summary: str
     reason: str
     suggested_action: str
+
+
+class MessageWorkflowState(TypedDict, total=False):
+    """Serializable state carried through the Slack processing graph."""
+
+    message_id: str
+    run_id: str
+    external_id: str | None
+    sender: str
+    text: str
+    channel: str
+    thread_ts: str | None
+    mention: bool
+    created_at: str
+    priority_result: dict[str, Any]
+    related_messages: list[dict[str, Any]]
+    context: dict[str, Any]
+    action_extraction: dict[str, Any]
+    decision_memory: dict[str, Any]
+    message: dict[str, Any]
+
+
+def langsmith_status() -> dict[str, Any]:
+    """Return safe LangSmith configuration without exposing the API key."""
+    return {
+        "provider": "langsmith",
+        "enabled": LANGSMITH_TRACING,
+        "configured": bool(LANGSMITH_API_KEY),
+        "active": bool(LANGSMITH_TRACING and LANGSMITH_API_KEY),
+        "project": LANGSMITH_PROJECT,
+        "endpoint": LANGSMITH_ENDPOINT,
+        "capture_content": LANGSMITH_CAPTURE_CONTENT,
+    }
+
+
+def trace_state_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    state = inputs.get("state", inputs)
+    if not isinstance(state, dict):
+        return {"input_type": type(state).__name__}
+    summary: dict[str, Any] = {
+        "message_id": state.get("message_id"),
+        "channel": state.get("channel"),
+        "thread_ts": state.get("thread_ts"),
+        "classification": state.get("priority_result", {}).get("classification"),
+    }
+    text_value = state.get("text")
+    if LANGSMITH_CAPTURE_CONTENT:
+        summary["text"] = text_value
+    elif isinstance(text_value, str):
+        summary["text_length"] = len(text_value)
+    return summary
+
+
+def trace_node_outputs(output: Any) -> dict[str, Any]:
+    if LANGSMITH_CAPTURE_CONTENT:
+        return output if isinstance(output, dict) else {"output": output}
+    if not isinstance(output, dict):
+        return {"output_type": type(output).__name__}
+    summary: dict[str, Any] = {}
+    for key, value in output.items():
+        if key == "message" and isinstance(value, dict):
+            summary[key] = {
+                field: value.get(field)
+                for field in ("id", "priority", "classification", "score")
+                if field in value
+            }
+        elif key in {"message_id", "priority_result", "context", "action_extraction", "decision_memory"}:
+            if key == "priority_result" and isinstance(value, dict):
+                summary[key] = {
+                    field: value.get(field)
+                    for field in ("priority", "classification", "score")
+                    if field in value
+                }
+            elif isinstance(value, dict):
+                summary[key] = {
+                    field: value.get(field)
+                    for field in ("agent", "status", "confidence")
+                    if field in value
+                }
+                for collection in ("items", "sources", "related_messages"):
+                    if isinstance(value.get(collection), list):
+                        summary[key][f"{collection}_count"] = len(value[collection])
+        elif isinstance(value, list):
+            summary[f"{key}_count"] = len(value)
+        elif key not in {"text", "briefing", "suggested_response", "memory", "title", "decision"}:
+            summary[key] = value
+    return summary
+
+
+def trace_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    evidence = inputs.get("evidence")
+    summary = {
+        "agent": inputs.get("agent_name"),
+        "model": LLM_MODEL,
+        "max_tokens": inputs.get("max_tokens"),
+        "evidence_keys": sorted(evidence.keys()) if isinstance(evidence, dict) else [],
+    }
+    if LANGSMITH_CAPTURE_CONTENT:
+        summary["instructions"] = inputs.get("instructions")
+        summary["evidence"] = evidence
+    return summary
+
+
+def trace_llm_outputs(output: Any) -> dict[str, Any]:
+    if LANGSMITH_CAPTURE_CONTENT:
+        return output if isinstance(output, dict) else {"output": output}
+    return {
+        "result_type": type(output).__name__,
+        "result_keys": sorted(output.keys()) if isinstance(output, dict) else [],
+        "has_result": output is not None,
+    }
+
+
+def trace_mem0_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    payload = inputs.get("payload")
+    summary = {
+        "path": inputs.get("path"),
+        "payload_keys": sorted(payload.keys()) if isinstance(payload, dict) else [],
+    }
+    if LANGSMITH_CAPTURE_CONTENT:
+        summary["payload"] = payload
+    return summary
 
 
 ACTION_TERMS = re.compile(r"\b(please|need|needs|review|approve|confirm|respond|reply|send|fix|blocker|follow up|follow-up|assign|action)\b", re.I)
@@ -633,6 +777,12 @@ def mem0_status() -> dict[str, Any]:
     }
 
 
+@traceable(
+    name="Mem0 API call",
+    run_type="tool",
+    process_inputs=trace_mem0_inputs,
+    process_outputs=trace_llm_outputs,
+)
 def call_mem0_json(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     if not (MEM0_ENABLED and MEM0_API_KEY):
         return None
@@ -931,6 +1081,12 @@ def sync_saved_decision_memories() -> dict[str, Any]:
     return {"provider": "mem0", "status": "complete" if not failed else "partial", "synced": synced, "failed": failed, "mem0": mem0_status()}
 
 
+@traceable(
+    name="Nebius JSON agent",
+    run_type="llm",
+    process_inputs=trace_llm_inputs,
+    process_outputs=trace_llm_outputs,
+)
 def call_llm_json_agent(
     agent_name: str,
     instructions: str,
@@ -1086,16 +1242,12 @@ def extract_actions(
     return {"agent": "llm", "status": "complete", "items": llm_actions}
 
 
-def enrich_context(
+def synthesize_context(
     text: str,
     classification: str,
-    channel: str | None = None,
-    thread_ts: str | None = None,
-    exclude_message_id: str | None = None,
-    current_message_id: str | None = None,
-    message_created_at: str | None = None,
+    related_messages: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    related_messages = find_related_messages(text, channel, thread_ts, exclude_message_id)
+    """Build system findings and optionally synthesize them with Nebius."""
     context = build_mock_context(text, classification, related_messages)
     llm_result = call_llm_context_agent(text, classification, related_messages, context)
     if llm_result:
@@ -1111,6 +1263,20 @@ def enrich_context(
                 "confidence": llm_result["confidence"],
             }
         )
+    return context
+
+
+def enrich_context(
+    text: str,
+    classification: str,
+    channel: str | None = None,
+    thread_ts: str | None = None,
+    exclude_message_id: str | None = None,
+    current_message_id: str | None = None,
+    message_created_at: str | None = None,
+) -> dict[str, Any]:
+    related_messages = find_related_messages(text, channel, thread_ts, exclude_message_id)
+    context = synthesize_context(text, classification, related_messages)
     context["action_extraction"] = extract_actions(
         text,
         channel,
@@ -1167,13 +1333,35 @@ def prioritize_message(text: str, mention: bool = False) -> PriorityResult:
 
 
 def connection() -> sqlite3.Connection:
-    database = sqlite3.connect(DATABASE_PATH)
+    database = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     database.row_factory = sqlite3.Row
+    database.execute("PRAGMA busy_timeout = 30000")
     return database
 
 
 def initialize_database() -> None:
     with connection() as database:
+        database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                run_id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                channel TEXT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                duration_ms INTEGER,
+                classification TEXT,
+                context_agent TEXT,
+                action_agent TEXT,
+                decision_agent TEXT,
+                error TEXT
+            )
+            """
+        )
+        database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at ON workflow_runs(started_at DESC)"
+        )
         database.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
@@ -1242,6 +1430,442 @@ def initialize_database() -> None:
         database.commit()
 
 
+def record_workflow_start(run_id: str, message_id: str, channel: str | None) -> None:
+    with connection() as database:
+        database.execute(
+            """
+            INSERT INTO workflow_runs (run_id, message_id, channel, status, started_at)
+            VALUES (?, ?, ?, 'running', ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                message_id = excluded.message_id,
+                channel = excluded.channel,
+                status = 'running',
+                started_at = excluded.started_at,
+                completed_at = NULL,
+                duration_ms = NULL,
+                classification = NULL,
+                context_agent = NULL,
+                action_agent = NULL,
+                decision_agent = NULL,
+                error = NULL
+            """,
+            (run_id, message_id, channel, utc_now()),
+        )
+        database.commit()
+
+
+def record_workflow_finish(
+    run_id: str,
+    status: str,
+    duration_ms: int,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    result = result or {}
+    priority = result.get("priority_result", {}) if isinstance(result, dict) else {}
+    context = result.get("context", {}) if isinstance(result, dict) else {}
+    actions = result.get("action_extraction", {}) if isinstance(result, dict) else {}
+    decisions = result.get("decision_memory", {}) if isinstance(result, dict) else {}
+    with connection() as database:
+        database.execute(
+            """
+            UPDATE workflow_runs
+            SET status = ?, completed_at = ?, duration_ms = ?, classification = ?,
+                context_agent = ?, action_agent = ?, decision_agent = ?, error = ?
+            WHERE run_id = ?
+            """,
+            (
+                status,
+                utc_now(),
+                duration_ms,
+                priority.get("classification"),
+                context.get("agent"),
+                actions.get("agent"),
+                decisions.get("agent"),
+                error,
+                run_id,
+            ),
+        )
+        database.commit()
+
+
+def observability_summary() -> dict[str, Any]:
+    with connection() as database:
+        totals = database.execute(
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+                   AVG(CASE WHEN status = 'completed' THEN duration_ms END)
+            FROM workflow_runs
+            """
+        ).fetchone()
+        rows = database.execute(
+            """
+            SELECT run_id, message_id, channel, status, started_at, completed_at,
+                   duration_ms, classification, context_agent, action_agent,
+                   decision_agent, error
+            FROM workflow_runs
+            ORDER BY started_at DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        classification_rows = database.execute(
+            """
+            SELECT classification, COUNT(*)
+            FROM workflow_runs
+            WHERE classification IS NOT NULL
+            GROUP BY classification
+            ORDER BY COUNT(*) DESC, classification
+            """
+        ).fetchall()
+    return {
+        "workflow": langgraph_status(),
+        "langsmith": langsmith_status(),
+        "metrics": {
+            "total_runs": int(totals[0] or 0),
+            "completed_runs": int(totals[1] or 0),
+            "failed_runs": int(totals[2] or 0),
+            "running_runs": int((totals[0] or 0) - (totals[1] or 0) - (totals[2] or 0)),
+            "average_duration_ms": round(float(totals[3] or 0), 1),
+            "classifications": {str(row[0]): int(row[1]) for row in classification_rows},
+        },
+        "recent_runs": [
+            {
+                "run_id": row[0],
+                "message_id": row[1],
+                "channel": row[2],
+                "status": row[3],
+                "started_at": row[4],
+                "completed_at": row[5],
+                "duration_ms": row[6],
+                "classification": row[7],
+                "context_agent": row[8],
+                "action_agent": row[9],
+                "decision_agent": row[10],
+                "error": row[11],
+            }
+            for row in rows
+        ],
+    }
+
+
+_LANGGRAPH_GRAPH: Any | None = None
+_LANGGRAPH_CHECKPOINTER: Any | None = None
+_LANGGRAPH_CHECKPOINT_CONNECTION: sqlite3.Connection | None = None
+_LANGGRAPH_EXIT_STACK = ExitStack()
+_LANGGRAPH_LOCK = RLock()
+
+
+def langgraph_status() -> dict[str, Any]:
+    """Return safe workflow configuration without exposing connection details."""
+    return {
+        "engine": "langgraph",
+        "checkpointer": LANGGRAPH_CHECKPOINTER,
+        "checkpoint_path": str(LANGGRAPH_CHECKPOINT_PATH) if LANGGRAPH_CHECKPOINTER == "sqlite" else None,
+        "postgres_configured": bool(LANGGRAPH_POSTGRES_URI) if LANGGRAPH_CHECKPOINTER == "postgres" else None,
+    }
+
+
+def get_langgraph_checkpointer() -> Any:
+    """Create one process-wide durable checkpointer for the compiled graph."""
+    global _LANGGRAPH_CHECKPOINTER, _LANGGRAPH_CHECKPOINT_CONNECTION
+    with _LANGGRAPH_LOCK:
+        if _LANGGRAPH_CHECKPOINTER is not None:
+            return _LANGGRAPH_CHECKPOINTER
+        if LANGGRAPH_CHECKPOINTER == "postgres":
+            if not LANGGRAPH_POSTGRES_URI:
+                raise RuntimeError(
+                    "LANGGRAPH_POSTGRES_URI is required when LANGGRAPH_CHECKPOINTER=postgres"
+                )
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+            except ImportError as error:
+                raise RuntimeError(
+                    "Install langgraph-checkpoint-postgres and psycopg for the PostgreSQL checkpointer"
+                ) from error
+            _LANGGRAPH_CHECKPOINTER = _LANGGRAPH_EXIT_STACK.enter_context(
+                PostgresSaver.from_conn_string(LANGGRAPH_POSTGRES_URI)
+            )
+            _LANGGRAPH_CHECKPOINTER.setup()
+            return _LANGGRAPH_CHECKPOINTER
+        if LANGGRAPH_CHECKPOINTER != "sqlite":
+            raise RuntimeError("LANGGRAPH_CHECKPOINTER must be sqlite or postgres")
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+        except ImportError as error:
+            raise RuntimeError(
+                "Install langgraph-checkpoint-sqlite for the SQLite checkpointer"
+            ) from error
+        LANGGRAPH_CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LANGGRAPH_CHECKPOINT_CONNECTION = sqlite3.connect(
+            LANGGRAPH_CHECKPOINT_PATH,
+            timeout=30,
+            check_same_thread=False,
+        )
+        _LANGGRAPH_CHECKPOINTER = SqliteSaver(_LANGGRAPH_CHECKPOINT_CONNECTION)
+        _LANGGRAPH_CHECKPOINTER.setup()
+        return _LANGGRAPH_CHECKPOINTER
+
+
+@traceable(
+    name="Classify Slack message",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_classify_node(state: MessageWorkflowState) -> dict[str, Any]:
+    result = prioritize_message(state["text"], bool(state.get("mention")))
+    return {
+        "priority_result": {
+            "priority": result.priority,
+            "classification": result.classification,
+            "score": result.score,
+            "summary": result.summary,
+            "reason": result.reason,
+            "suggested_action": result.suggested_action,
+        }
+    }
+
+
+@traceable(
+    name="Find related Slack messages",
+    run_type="retriever",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_related_messages_node(state: MessageWorkflowState) -> dict[str, Any]:
+    return {
+        "related_messages": find_related_messages(
+            state["text"],
+            state.get("channel"),
+            state.get("thread_ts"),
+            state.get("message_id"),
+        )
+    }
+
+
+@traceable(
+    name="Context enrichment",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_context_node(state: MessageWorkflowState) -> dict[str, Any]:
+    return {
+        "context": synthesize_context(
+            state["text"],
+            state["priority_result"]["classification"],
+            state.get("related_messages", []),
+        )
+    }
+
+
+@traceable(
+    name="Action extraction",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_action_node(state: MessageWorkflowState) -> dict[str, Any]:
+    return {
+        "action_extraction": extract_actions(
+            state["text"],
+            state.get("channel"),
+            state.get("thread_ts"),
+            state.get("related_messages", []),
+            state.get("context", {}),
+            state.get("message_id"),
+        )
+    }
+
+
+@traceable(
+    name="Decision memory extraction",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_decision_node(state: MessageWorkflowState) -> dict[str, Any]:
+    return {
+        "decision_memory": extract_decision_memory(
+            state["text"],
+            state.get("channel"),
+            state.get("thread_ts"),
+            state.get("related_messages", []),
+            state.get("context", {}),
+            state.get("message_id"),
+            state.get("created_at"),
+        )
+    }
+
+
+def persist_workflow_message(state: MessageWorkflowState) -> dict[str, Any]:
+    """Persist graph output while preserving decisions on safe retries."""
+    priority = state["priority_result"]
+    context = state.get("context", {})
+    action_extraction = state.get("action_extraction", {"agent": "mock", "status": "complete", "items": []})
+    decision_memory = state.get("decision_memory", {"agent": "mock", "status": "complete", "items": []})
+    message_id = state["message_id"]
+    database_values = (
+        state.get("external_id"),
+        state.get("channel") or "demo",
+        state.get("thread_ts"),
+        state.get("sender") or "Slack user",
+        state["text"],
+        priority["priority"],
+        priority["classification"],
+        json.dumps(context),
+        json.dumps(action_extraction),
+        priority["score"],
+        priority["summary"],
+        priority["reason"],
+        priority["suggested_action"],
+        state["created_at"],
+    )
+
+    with connection() as database:
+        existing = database.execute(
+            "SELECT decision_memory_json FROM messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+        if existing is None:
+            database.execute(
+                """
+                INSERT INTO messages (
+                    id, external_id, channel, thread_ts, sender, text, priority,
+                    classification, context_json, actions_json, decision_memory_json,
+                    score, summary, reason, suggested_action, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (message_id, *database_values),
+            )
+        else:
+            try:
+                previous_decision_memory = json.loads(existing[0] or "{}")
+            except json.JSONDecodeError:
+                previous_decision_memory = {}
+            previous_store = previous_decision_memory.get("memory_store", {})
+            if isinstance(previous_store, dict) and previous_store.get("stored"):
+                decision_memory["memory_store"] = previous_store
+            database.execute(
+                """
+                UPDATE messages
+                SET external_id = COALESCE(?, external_id), channel = ?, thread_ts = ?,
+                    sender = ?, text = ?, priority = ?, classification = ?,
+                    context_json = ?, actions_json = ?, score = ?, summary = ?,
+                    reason = ?, suggested_action = ?, created_at = ?
+                WHERE id = ?
+                """,
+                (*database_values, message_id),
+            )
+        database.commit()
+
+    decision_memory = ensure_mem0_decision_memory(
+        decision_memory,
+        state.get("channel"),
+        state.get("thread_ts"),
+        message_id,
+        state.get("created_at"),
+    )
+    with connection() as database:
+        database.execute(
+            "UPDATE messages SET decision_memory_json = ? WHERE id = ?",
+            (json.dumps(decision_memory), message_id),
+        )
+        database.commit()
+    return {"message": get_message(message_id), "decision_memory": decision_memory}
+
+
+@traceable(
+    name="Persist workflow output",
+    run_type="tool",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_persist_node(state: MessageWorkflowState) -> dict[str, Any]:
+    return persist_workflow_message(state)
+
+
+def get_message_workflow() -> Any:
+    """Compile the processing graph once and reuse it for webhook and sync work."""
+    global _LANGGRAPH_GRAPH
+    with _LANGGRAPH_LOCK:
+        if _LANGGRAPH_GRAPH is not None:
+            return _LANGGRAPH_GRAPH
+        builder = StateGraph(MessageWorkflowState)
+        builder.add_node("classify", workflow_classify_node)
+        builder.add_node("related_messages", workflow_related_messages_node)
+        builder.add_node("context_enrichment", workflow_context_node)
+        builder.add_node("action_extraction", workflow_action_node)
+        builder.add_node("decision_memory", workflow_decision_node)
+        builder.add_node("persist", workflow_persist_node)
+        builder.add_edge(START, "classify")
+        builder.add_edge("classify", "related_messages")
+        builder.add_edge("related_messages", "context_enrichment")
+        builder.add_edge("context_enrichment", "action_extraction")
+        builder.add_edge("context_enrichment", "decision_memory")
+        builder.add_edge("action_extraction", "persist")
+        builder.add_edge("decision_memory", "persist")
+        builder.add_edge("persist", END)
+        _LANGGRAPH_GRAPH = builder.compile(checkpointer=get_langgraph_checkpointer())
+        return _LANGGRAPH_GRAPH
+
+
+def run_message_workflow(
+    text: str,
+    sender: str = "Mock Slack user",
+    channel: str = "demo",
+    external_id: str | None = None,
+    mention: bool = False,
+    thread_ts: str | None = None,
+    message_id: str | None = None,
+    created_at: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    message_id = message_id or str(uuid.uuid4())
+    created_at = created_at or utc_now()
+    workflow_state: MessageWorkflowState = {
+        "message_id": message_id,
+        "run_id": run_id or message_id,
+        "external_id": external_id,
+        "sender": sender,
+        "text": text,
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "mention": mention,
+        "created_at": created_at,
+    }
+    workflow_run_id = workflow_state["run_id"]
+    started = time.perf_counter()
+    record_workflow_start(workflow_run_id, message_id, channel)
+    try:
+        result = get_message_workflow().invoke(
+            workflow_state,
+            {
+                "configurable": {"thread_id": workflow_run_id},
+                "run_name": "Slack message workflow",
+                "tags": ["zaroori-baat", "slack", "message-workflow"],
+                "metadata": {
+                    "workflow_version": "1",
+                    "message_id": message_id,
+                    "channel": channel,
+                },
+            },
+        )
+    except Exception as error:  # noqa: BLE001
+        record_workflow_finish(
+            workflow_run_id,
+            "failed",
+            int((time.perf_counter() - started) * 1000),
+            error=type(error).__name__,
+        )
+        raise
+    record_workflow_finish(
+        workflow_run_id,
+        "completed",
+        int((time.perf_counter() - started) * 1000),
+        result,
+    )
+    return result["message"]
+
+
 def create_message(
     text: str,
     sender: str = "Mock Slack user",
@@ -1256,26 +1880,18 @@ def create_message(
         if existing:
             return get_message(existing[0])
 
-    result = prioritize_message(text, mention)
     message_id = str(uuid.uuid4())
     created_at = utc_now()
-    context = enrich_context(text, result.classification, channel, thread_ts, message_id, message_id, created_at)
-    action_extraction = context.pop("action_extraction", build_fallback_actions(text, channel, thread_ts, [], message_id))
-    decision_memory = context.pop("decision_memory", build_fallback_decision_memory(text, channel, thread_ts, [], message_id, created_at))
-    with connection() as database:
-        database.execute("""
-            INSERT INTO messages (id, external_id, channel, thread_ts, sender, text, priority, classification, context_json, actions_json, decision_memory_json, score, summary, reason, suggested_action, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (message_id, external_id, channel, thread_ts, sender, text, result.priority, result.classification, json.dumps(context), json.dumps(action_extraction), json.dumps(decision_memory), result.score, result.summary, result.reason, result.suggested_action, created_at))
-        database.commit()
-    decision_memory = ensure_mem0_decision_memory(decision_memory, channel, thread_ts, message_id, created_at)
-    with connection() as database:
-        database.execute(
-            "UPDATE messages SET decision_memory_json = ? WHERE id = ?",
-            (json.dumps(decision_memory), message_id),
-        )
-        database.commit()
-    return get_message(message_id)
+    return run_message_workflow(
+        text,
+        sender,
+        channel,
+        external_id,
+        mention,
+        thread_ts,
+        message_id,
+        created_at,
+    )
 
 
 def message_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -1319,19 +1935,23 @@ def list_messages() -> list[dict[str, Any]]:
 
 def refresh_message_context(message_id: str) -> dict[str, Any]:
     with connection() as database:
-        row = database.execute("SELECT text, classification, channel, thread_ts, created_at FROM messages WHERE id = ?", (message_id,)).fetchone()
+        row = database.execute(
+            "SELECT text, channel, thread_ts, created_at, external_id, sender FROM messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
         if row is None:
             raise KeyError(message_id)
-        context = enrich_context(row[0], row[1], row[2], row[3], message_id, message_id, row[4])
-        action_extraction = context.pop("action_extraction", build_fallback_actions(row[0], row[2], row[3], [], message_id))
-        decision_memory = context.pop("decision_memory", build_fallback_decision_memory(row[0], row[2], row[3], [], message_id, row[4]))
-        decision_memory = ensure_mem0_decision_memory(decision_memory, row[2], row[3], message_id, row[4])
-        database.execute(
-            "UPDATE messages SET context_json = ?, actions_json = ?, decision_memory_json = ? WHERE id = ?",
-            (json.dumps(context), json.dumps(action_extraction), json.dumps(decision_memory), message_id),
-        )
-        database.commit()
-    return get_message(message_id)
+    return run_message_workflow(
+        row[0],
+        row[5],
+        row[1],
+        row[4],
+        "<@" in row[0],
+        row[2],
+        message_id,
+        row[3],
+        f"refresh:{message_id}:{uuid.uuid4()}",
+    )
 
 
 def record_decision(message_id: str, decision: str) -> dict[str, Any]:
@@ -1420,14 +2040,30 @@ class Handler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         if path == "/health":
-            self.send_json({"status": "ok", "service": "zaroori-baat-slack"})
+            self.send_json(
+                {
+                    "status": "ok",
+                    "service": "zaroori-baat-slack",
+                    "workflow": langgraph_status(),
+                    "observability": langsmith_status(),
+                }
+            )
+        elif path == "/api/workflow/status":
+            self.send_json(langgraph_status())
+        elif path == "/api/observability/status":
+            self.send_json(langsmith_status())
+        elif path == "/api/observability/summary":
+            self.send_json(observability_summary())
         elif path == "/api/messages":
             self.send_json({"messages": list_messages()})
         elif path == "/api/decision-memory/status":
             self.send_json(mem0_status())
         elif path == "/api/decision-memory/search":
             query = parse_qs(parsed_url.query).get("q", [""])[0]
-            self.send_json(search_decision_memories(query))
+            if not query.strip():
+                self.send_json({"error": "query is required"}, HTTPStatus.BAD_REQUEST)
+            else:
+                self.send_json(search_decision_memories(query))
         elif path == "/webhooks/slack":
             self.send_json({"error": "Use POST for Slack events"}, HTTPStatus.METHOD_NOT_ALLOWED)
         elif path in {"/", "/index.html"}:
@@ -1474,6 +2110,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         except KeyError:
             self.send_json({"error": "Message not found"}, HTTPStatus.NOT_FOUND)
+        except RuntimeError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+        except Exception as error:  # noqa: BLE001
+            print(f"Request failed: {error}")
+            self.send_json({"error": "Internal server error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def serve(self, filename: str, content_type: str) -> None:
         content = (ROOT / filename).read_bytes()
@@ -1490,8 +2131,9 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     initialize_database()
     seed_demo()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Zaroori Baat Slack running at http://127.0.0.1:{PORT}")
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server.daemon_threads = True
+    print(f"Zaroori Baat Slack running at http://{HOST}:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
