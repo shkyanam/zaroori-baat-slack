@@ -1,6 +1,8 @@
 # Zaroori Baat Slack
 
-## Slack Signal Desk
+## Review workspace
+
+The React review workspace connects to the existing Python APIs and guides conversations through **Understand → Prepare → Decide**. It includes a priority inbox, extracted action items, decision memory, reviewed conversations, and system status. See [local setup and review journeys](LOCAL_DEVELOPMENT.md) for Windows instructions, the optional offline demo dataset, and browser tests. The [Daybreak design system](frontend/DESIGN_SYSTEM.md) documents the shared typography and visual tokens. Once built, the Python server serves the workspace at `/`; the original frontend remains at `/legacy`.
 
 Zaroori Baat Slack scans incoming Slack message events, scores actionability, and ranks the messages most likely to need a response, owner, or decision.
 
@@ -9,10 +11,12 @@ Zaroori Baat Slack scans incoming Slack message events, scores actionability, an
 ### Run locally
 
 ```bash
-cd /Users/shalinikyanam/Documents/Training/MasteringAgenticAI/SlackProject
+cd zaroori-baat-slack
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+npm --prefix frontend ci
+npm --prefix frontend run build
 python3 app.py
 ```
 

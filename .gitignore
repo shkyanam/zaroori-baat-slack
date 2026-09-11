@@ -6,3 +6,10 @@ __pycache__/
 .venv/
 .DS_Store
 ~$*
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+frontend/playwright-report/
+frontend/test-results/
+.cache/
+.runtime/

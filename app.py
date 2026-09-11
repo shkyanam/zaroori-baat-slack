@@ -3,20 +3,21 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import re
 import sqlite3
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import RLock
-from typing import Any, TypedDict
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Iterator, TypedDict
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from langsmith import traceable
@@ -27,6 +28,8 @@ DATABASE_PATH = ROOT / "zaroori_baat_slack.sqlite3"
 
 
 def load_local_env() -> None:
+    if os.environ.get("ZAROORI_BAAT_SKIP_ENV") == "1":
+        return
     env_path = ROOT / ".env"
     if not env_path.exists():
         return
@@ -938,9 +941,13 @@ def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
     query_terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2 and term not in ignored}
     with connection() as database:
         rows = database.execute(
-            "SELECT id, channel, thread_ts, text, decision_memory_json, created_at FROM messages WHERE decision_memory_json != '{}'"
+            "SELECT id, channel, thread_ts, text, decision_memory_json, created_at FROM messages"
         ).fetchall()
-    matches: list[tuple[int, str, dict[str, Any]]] = []
+    sources_by_id = {row[0]: row for row in rows}
+    # Context enrichment repeats decisions in other message envelopes. Resolve
+    # their evidence first so copies cannot inflate results or supply unrelated
+    # search terms, timestamps, and source links.
+    unique: dict[tuple[tuple[str, ...], str], tuple[sqlite3.Row, dict[str, Any], list[str]]] = {}
     for row in rows:
         try:
             decision_memory = json.loads(row[4] or "{}")
@@ -949,36 +956,53 @@ def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
         for item in decision_memory.get("items", []) if isinstance(decision_memory, dict) else []:
             if not isinstance(item, dict) or not item.get("decision"):
                 continue
-            searchable = " ".join(
-                [
-                    str(item.get("decision", "")),
-                    " ".join(str(value) for value in item.get("alternatives_considered", [])),
-                    " ".join(str(value) for value in item.get("participants", [])),
-                    str(item.get("rationale", "")),
-                    row[3],
-                ]
-            ).lower()
-            overlap = len(query_terms & set(re.findall(r"[a-z0-9]+", searchable)))
-            if query_terms and not overlap:
-                continue
-            matches.append(
-                (
-                    overlap,
-                    row[5],
-                    {
-                        "id": f"local-{row[0]}",
-                        "memory": decision_memory_text(item),
-                        "metadata": {
-                            "memory_type": "decision",
-                            "source_message_id": row[0],
-                            "channel": row[1],
-                            "thread_ts": row[2] or "",
-                        },
-                        "created_at": item.get("date") or row[5],
-                        "score": overlap,
+            source_ids = clean_string_list(item.get("source_message_ids")) or [row[0]]
+            key = (tuple(sorted(set(source_ids))), " ".join(re.findall(r"\w+", str(item["decision"]).casefold())))
+            previous = unique.get(key)
+            if previous is None or (row[0] in source_ids and previous[0][0] not in source_ids):
+                unique[key] = (row, item, source_ids)
+
+    matches: list[tuple[int, str, dict[str, Any]]] = []
+    for key, (envelope, item, source_ids) in unique.items():
+        source_rows = [sources_by_id[source_id] for source_id in source_ids if source_id in sources_by_id]
+        original = source_rows[0] if source_rows else None
+        source_id = original[0] if original else source_ids[0]
+        searchable = " ".join(
+            [
+                str(item.get("decision", "")),
+                " ".join(clean_string_list(item.get("alternatives_considered"))),
+                " ".join(clean_string_list(item.get("participants"))),
+                str(item.get("rationale") or ""),
+                " ".join(source[3] for source in source_rows),
+            ]
+        ).lower()
+        overlap = len(query_terms & set(re.findall(r"[a-z0-9]+", searchable)))
+        if query_terms and not overlap:
+            continue
+        channel = original[1] if original else ""
+        thread_ts = original[2] if original else ""
+        created_at = item.get("date") or (original[5] if original else envelope[5])
+        memory_item = {**item, "source": action_source_label(channel, thread_ts)}
+        stable_id = hashlib.sha256(json.dumps(key).encode()).hexdigest()[:16]
+        matches.append(
+            (
+                overlap,
+                created_at,
+                {
+                    "id": f"local-{stable_id}",
+                    "memory": decision_memory_text(memory_item),
+                    "metadata": {
+                        "memory_type": "decision",
+                        "source_message_id": source_id,
+                        "source_message_ids": source_ids,
+                        "channel": channel,
+                        "thread_ts": thread_ts or "",
                     },
-                )
+                    "created_at": created_at,
+                    "score": overlap,
+                },
             )
+        )
     matches.sort(key=lambda match: (match[0], match[1]), reverse=True)
     return [match[2] for match in matches[:MEM0_MAX_RESULTS]]
 
@@ -1332,15 +1356,23 @@ def prioritize_message(text: str, mention: bool = False) -> PriorityResult:
     return PriorityResult(priority, classification, score, normalized[:140], reason, suggested_action)
 
 
-def connection() -> sqlite3.Connection:
+@contextmanager
+def connection() -> Iterator[sqlite3.Connection]:
     database = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA busy_timeout = 30000")
-    return database
+    try:
+        with database:
+            yield database
+    finally:
+        # SQLite's transaction context does not close its connection. Closing
+        # explicitly prevents leaked handles and locked database files on Windows.
+        database.close()
 
 
 def initialize_database() -> None:
     with connection() as database:
+        database.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         database.execute(
             """
             CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -1955,10 +1987,12 @@ def refresh_message_context(message_id: str) -> dict[str, Any]:
 
 
 def record_decision(message_id: str, decision: str) -> dict[str, Any]:
-    if decision not in {"approved", "dismissed", "deferred", "escalated"}:
+    if decision not in {"approved", "dismissed", "deferred", "escalated", "pending"}:
         raise ValueError("Invalid decision")
+    stored_decision = None if decision == "pending" else decision
+    decided_at = None if decision == "pending" else utc_now()
     with connection() as database:
-        cursor = database.execute("UPDATE messages SET decision = ?, decided_at = ? WHERE id = ?", (decision, utc_now(), message_id))
+        cursor = database.execute("UPDATE messages SET decision = ?, decided_at = ? WHERE id = ?", (stored_decision, decided_at, message_id))
         if cursor.rowcount == 0:
             raise KeyError(message_id)
         database.commit()
@@ -2012,16 +2046,50 @@ def sync_slack_history() -> int:
                 message.get("thread_ts"),
             )
             count += 1
+    with connection() as database:
+        database.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('slack_last_sync_at', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (utc_now(),),
+        )
+        database.commit()
     return count
+
+
+def system_status() -> dict[str, Any]:
+    """UI integration status containing no credentials, IDs, or local paths."""
+    with connection() as database:
+        last_sync = database.execute(
+            "SELECT value FROM app_settings WHERE key = 'slack_last_sync_at'"
+        ).fetchone()
+        has_demo = database.execute(
+            "SELECT 1 FROM messages WHERE external_id LIKE 'demo-%' LIMIT 1"
+        ).fetchone()
+    memory = mem0_status()
+    workflow = langgraph_status()
+    return {
+        "slack": {
+            "configured": bool(SLACK_BOT_TOKEN and SLACK_CHANNEL_IDS),
+            "channel_count": len(SLACK_CHANNEL_IDS),
+            "last_sync_at": last_sync[0] if last_sync else None,
+        },
+        "context": {
+            "enabled": bool(LLM_CONTEXT_ENABLED and LLM_API_KEY and LLM_MODEL),
+            "external_sources": "mock",
+        },
+        "memory": {key: memory[key] for key in ("provider", "enabled", "configured", "active")},
+        "workflow": {key: workflow[key] for key in ("engine", "checkpointer", "postgres_configured")},
+        "demo": bool(has_demo),
+    }
 
 
 def seed_demo() -> None:
     with connection() as database:
         if database.execute("SELECT COUNT(*) FROM messages").fetchone()[0]:
             return
-    create_message("Production is blocked. Please review the deployment failure and assign an owner today.", "Asha", "#platform")
-    create_message("Please review the procurement requirements before EOD.", "Amrish", "#product")
-    create_message("FYI: team lunch is next Friday.", "Ravi", "#general")
+    create_message("Production is blocked. Please review the deployment failure and assign an owner today.", "Asha", "#platform", "demo-default-platform")
+    create_message("Please review the procurement requirements before EOD.", "Amrish", "#product", "demo-default-product")
+    create_message("FYI: team lunch is next Friday.", "Ravi", "#general", "demo-default-general")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2050,12 +2118,19 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif path == "/api/workflow/status":
             self.send_json(langgraph_status())
+        elif path == "/api/system/status":
+            self.send_json(system_status())
         elif path == "/api/observability/status":
             self.send_json(langsmith_status())
         elif path == "/api/observability/summary":
             self.send_json(observability_summary())
         elif path == "/api/messages":
             self.send_json({"messages": list_messages()})
+        elif re.fullmatch(r"/api/messages/[^/]+", path):
+            try:
+                self.send_json(get_message(unquote(path.rsplit("/", 1)[1])))
+            except KeyError:
+                self.send_json({"error": "Message not found"}, HTTPStatus.NOT_FOUND)
         elif path == "/api/decision-memory/status":
             self.send_json(mem0_status())
         elif path == "/api/decision-memory/search":
@@ -2067,7 +2142,14 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/webhooks/slack":
             self.send_json({"error": "Use POST for Slack events"}, HTTPStatus.METHOD_NOT_ALLOWED)
         elif path in {"/", "/index.html"}:
+            built_index = ROOT / "frontend" / "dist" / "index.html"
+            self.serve_path(built_index if built_index.is_file() else ROOT / "index.html", "text/html; charset=utf-8")
+        elif path in {"/legacy", "/legacy/", "/legacy/index.html"}:
             self.serve("index.html", "text/html; charset=utf-8")
+        elif path.startswith("/assets/"):
+            self.serve_asset(path)
+        elif path == "/favicon.svg":
+            self.serve_path(ROOT / "frontend" / "dist" / "favicon.svg", "image/svg+xml")
         elif path == "/styles.css":
             self.serve("styles.css", "text/css; charset=utf-8")
         elif path == "/app.js":
@@ -2080,6 +2162,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.read_body()
             payload = json.loads(body or b"{}")
+            if not isinstance(payload, dict):
+                raise ValueError("JSON request body must be an object")
             if path == "/webhooks/slack":
                 if not verify_slack_signature(body, self.headers.get("X-Slack-Request-Timestamp"), self.headers.get("X-Slack-Signature")):
                     self.send_json({"error": "Invalid Slack signature"}, HTTPStatus.FORBIDDEN)
@@ -2117,10 +2201,41 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "Internal server error"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def serve(self, filename: str, content_type: str) -> None:
-        content = (ROOT / filename).read_bytes()
+        self.serve_path(ROOT / filename, content_type)
+
+    def serve_asset(self, request_path: str) -> None:
+        asset_root = (ROOT / "frontend" / "dist" / "assets").resolve()
+        relative_path = unquote(request_path[len("/assets/"):])
+        # Backslashes and colons have path/stream semantics on Windows.
+        if not relative_path or "\\" in relative_path or ":" in relative_path or "\x00" in relative_path:
+            self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            asset_path = (asset_root / relative_path).resolve()
+            asset_path.relative_to(asset_root)
+        except (ValueError, OSError):
+            self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            return
+        content_type = {
+            ".js": "text/javascript; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".svg": "image/svg+xml",
+        }.get(asset_path.suffix.lower()) or mimetypes.guess_type(str(asset_path))[0] or "application/octet-stream"
+        self.serve_path(asset_path, content_type)
+
+    def serve_path(self, file_path: Path, content_type: str) -> None:
+        try:
+            if not file_path.is_file():
+                raise FileNotFoundError
+            content = file_path.read_bytes()
+        except (OSError, ValueError):
+            self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(content)
 
