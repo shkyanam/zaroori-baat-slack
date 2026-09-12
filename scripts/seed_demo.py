@@ -23,7 +23,7 @@ MESSAGES = [
     {
         "key": "checkout-incident", "sender": "Rajesh Kumar", "channel": "#payments",
         "minutes_ago": 14, "mention": True, "thread": "checkout-latency",
-        "text": "<@Mitesh> SEV-2 incident: checkout latency has crossed 4 seconds after the payments deploy. About 12% of requests are timing out. Please review the rollback plan before today. Owner: Rajesh. Customer support needs an update in 30 minutes.",
+        "text": "SEV-2 incident: checkout latency has crossed 4 seconds after the payments deploy. About 12% of requests are timing out. Please review the rollback plan before today. Owner: Rajesh. Customer support needs an update in 30 minutes.",
     },
     {
         "key": "checkout-evidence", "sender": "Shalini Kyanam", "channel": "#payments",

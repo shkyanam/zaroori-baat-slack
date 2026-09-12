@@ -158,6 +158,14 @@ export default function System({
                       ? dateTime(status.data.slack.last_sync_at)
                       : 'No successful sync recorded'}
                   </p>
+                  <span className="field-label">Current sync</span>
+                  <p>
+                    {['running', 'processing'].includes(status.data.slack.sync?.status || '')
+                      ? 'In progress — new messages appear as they finish processing.'
+                      : status.data.slack.sync?.status === 'failed'
+                        ? 'Failed — try again after checking the server log.'
+                        : 'Ready'}
+                  </p>
                 </details>
               </article>
               <article className={styles.integrationCard}>

@@ -57,7 +57,11 @@ export default function App() {
   const sync = useMutation({
     mutationFn: api.sync,
     onSuccess: (result) => {
-      notify(`Synced · ${result.ingested} conversations processed`);
+      notify(
+        result.status === 'already_running'
+          ? 'Sync already in progress'
+          : 'Sync started · messages will appear as they finish processing',
+      );
       void client.invalidateQueries({ queryKey: ['messages'] });
       void client.invalidateQueries({ queryKey: ['system'] });
       void client.invalidateQueries({ queryKey: ['observability'] });
@@ -69,6 +73,15 @@ export default function App() {
           : error.message,
       ),
   });
+  useEffect(() => {
+    if (!['running', 'processing'].includes(system.data?.slack.sync?.status || '')) return undefined;
+    const timer = window.setInterval(() => {
+      void client.invalidateQueries({ queryKey: ['messages'] });
+      void client.invalidateQueries({ queryKey: ['system'] });
+      void client.invalidateQueries({ queryKey: ['observability'] });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [client, system.data?.slack.sync?.status]);
   useEffect(() => setMobileNav(false), [location.pathname, location.search]);
   useEffect(() => {
     if (!toast) return;
@@ -196,11 +209,27 @@ export default function App() {
             className="icon-button sync-button"
             aria-label="Sync Slack"
             title="Sync Slack"
-            disabled={sync.isPending}
+            disabled={
+              sync.isPending ||
+              ['running', 'processing'].includes(system.data?.slack.sync?.status || '')
+            }
             onClick={() => sync.mutate()}
           >
-            <RefreshCw size={17} className={sync.isPending ? 'spinning' : ''} />
-            <span>{sync.isPending ? 'Syncing…' : 'Sync Slack'}</span>
+            <RefreshCw
+              size={17}
+              className={
+                sync.isPending ||
+                ['running', 'processing'].includes(system.data?.slack.sync?.status || '')
+                  ? 'spinning'
+                  : ''
+              }
+            />
+            <span>
+              {sync.isPending ||
+              ['running', 'processing'].includes(system.data?.slack.sync?.status || '')
+                ? 'Syncing…'
+                : 'Sync Slack'}
+            </span>
           </button>
           <span className="topbar-avatar" title="Mitesh · local workspace">
             M

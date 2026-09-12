@@ -20,7 +20,8 @@ export const api = {
     }),
   enrich: (id: string) =>
     request<Message>(`/api/messages/${encodeURIComponent(id)}/context`, { method: 'POST' }),
-  sync: () => request<{ ok: boolean; ingested: number }>('/api/slack/sync', { method: 'POST' }),
+  sync: () =>
+    request<{ ok: boolean; status: string; ingested: number }>('/api/slack/sync', { method: 'POST' }),
   memory: (query: string) =>
     request<MemoryResult>(`/api/decision-memory/search?q=${encodeURIComponent(query)}`),
   syncMemory: () =>

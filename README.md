@@ -22,6 +22,24 @@ python3 app.py
 
 Open http://127.0.0.1:8001.
 
+The `start_local.sh` convenience script starts the application and ngrok from
+the project directory:
+
+```bash
+./start_local.sh
+```
+
+Use its other modes for the golden dataset:
+
+```bash
+./start_local.sh golden-smoke
+./start_local.sh all
+```
+
+`golden-smoke` runs the guarded three-case test. `all` starts the live app,
+ngrok, and the smoke test together, but never starts the 50-case evaluation
+automatically.
+
 ### Slack app setup
 
 Create a Slack app at api.slack.com/apps and enable **Event Subscriptions**. Set the Request URL to:
@@ -91,9 +109,56 @@ LANGSMITH_PROJECT=zaroori-baat-slack
 LANGSMITH_CAPTURE_CONTENT=false
 ```
 
-The LangGraph run and each workflow node are traced, including the custom Nebius and Mem0 HTTP calls. `LANGSMITH_CAPTURE_CONTENT=false` hides trace inputs and outputs by default; set it to `true` only when Slack content is approved for observability storage. Check configuration at `/api/observability/status`, then open the configured project in [LangSmith](https://smith.langchain.com/).
+The LangGraph run and each workflow node are traced, including the custom Nebius and Mem0 HTTP calls. `LANGSMITH_CAPTURE_CONTENT=false` hides raw Slack text while retaining safe structured trace summaries; set it to `true` only when Slack content is approved for observability storage. Check configuration at `/api/observability/status`, then open the configured project in [LangSmith](https://smith.langchain.com/).
 
 The main app also includes an **Observability** panel with local workflow totals, completion/failure counts, average duration, recent run status, and classification counts. These metrics are stored without Slack message text in `workflow_runs`, so the panel remains useful even when LangSmith tracing is disabled. Use **Refresh metrics** after processing a new message; LangSmith provides the detailed trace view when tracing is active.
+
+For the Slack Message Intelligence golden dataset, synchronize the CSV mapping and verify the remote dataset with:
+
+```bash
+python upload_langsmith_dataset.py
+python verify_langsmith_dataset.py
+```
+
+The evaluation-facing `orchestrator` in `orchestrator.py` accepts a structured `slack_event` and `test_id`, returns the same 21-key result contract for completed and failed cases, and adds `test_id`, dataset, model, prompt, workflow, and evaluator versions to LangSmith evaluation traces. Keep `SMI_MODEL_NAME` unset when the application should derive it from `NEBIUS_MODEL`.
+
+Verify one end-to-end evaluation trace for the context-enrichment case:
+
+```bash
+python verify_langsmith_trace.py
+```
+
+This runs `SMI-GD-008`, locates the root trace named `smi-eval-SMI-GD-008`, and verifies the Signal Detection, Context Enrichment, Action Extraction, Decision Memory, and Router child runs. With `LANGSMITH_CAPTURE_CONTENT=false`, the check uses safe structured evidence and does not store Slack text. To inspect full briefing and response text for an approved test, temporarily set `LANGSMITH_CAPTURE_CONTENT=true` before running the check.
+
+Run the deterministic evaluators (EVAL-001 through EVAL-006 and EVAL-008) with:
+
+```bash
+python run_langsmith_eval.py --code-only
+```
+
+Run the required three-case smoke test before considering a 50-case run:
+
+```bash
+python run_langsmith_smoke.py
+```
+
+It runs SMI-GD-008, SMI-GD-027, and SMI-GD-044, verifies the trace ID and
+required agent child runs, and stops if an approval executes without human
+review or prompt injection changes the deterministic signal. Keep
+`LANGSMITH_CAPTURE_CONTENT=false` for this check.
+
+Each evaluator reads `Applicable_Metric_IDs` from the example metadata. A
+metric that is not listed returns `NOT_APPLICABLE`, not a zero score. The
+case-aware safety checks cover the timeout case SMI-GD-042, duplicate webhook
+case SMI-GD-043, and adversarial cases SMI-GD-044 through SMI-GD-050.
+
+Run the optional EVAL-007 LLM judge together with the code evaluators with:
+
+```bash
+python run_langsmith_eval.py
+```
+
+The LLM judge receives only the expected and generated briefing/suggested-response text. It cannot override deterministic signal classification, priority, workflow, human-review, or autonomous-action results. `SMI_ESCALATION_PROBABILITY_TOLERANCE` defaults to `0.10`, and `SMI_LATENCY_SLO_SECONDS` defaults to `5.0`.
 
 #### Test LangSmith tracing
 
@@ -105,7 +170,7 @@ I can own the test plan and validate parity before Friday.
 Let's use design pattern A instead of design pattern B. Pattern B has performance disadvantages.
 ```
 
-Click **Sync Slack** (or **Refresh**) in the app, then click **Refresh metrics** in the Observability panel. The panel should show a new completed workflow run. Open **Open LangSmith** and select the `zaroori-baat-slack` project to inspect the parent workflow and its nodes: classification, related-message retrieval, context enrichment, action extraction, decision memory, and persistence. Nebius and Mem0 calls appear when those integrations are enabled.
+Click **Sync Slack** (or **Refresh**) in the app, then click **Refresh metrics** in the Observability panel. Sync fetches only the latest `SLACK_SYNC_LIMIT` messages per configured channel (20 by default), uses the previous successful sync as the next history boundary, and processes fetched messages in the background. The UI remains responsive and refreshes as messages complete; a second Sync click while one is running is ignored. The panel should show a new completed workflow run. Open **Open LangSmith** and select the configured project to inspect the parent workflow and its nodes: Signal Detection, related-message retrieval, Context Enrichment, Action Extraction, Decision Memory, persistence, and Router. Nebius and Mem0 calls appear when those integrations are enabled.
 
 ### Design boundary
 
@@ -117,9 +182,31 @@ Every message is assigned one classification: **FYI**, **Action Required**, **Qu
 
 ### Context enrichment
 
-Messages received through the Slack webhook or **Sync Slack** are enriched before they appear in the queue. The enrichment agent uses each Slack message plus related messages from the locally synced Slack history as its input, checks mocked ADO, build history, the incident system, related PRs, and previous discussions, then presents the findings and a suggested response on the message card. Use **Refresh context** to rerun the enrichment.
+Messages received through the Slack webhook or **Sync Slack** are acknowledged and placed in the local Inbox immediately, then enriched in the background. Live ingestion uses the deterministic fast path by default (`SLACK_FAST_PATH=true`), so classification and fallback context/action results appear within seconds without waiting for Nebius or Mem0. The enrichment agent uses each Slack message plus related messages from the locally synced Slack history as its input, checks mocked ADO, build history, the incident system, related PRs, and previous discussions, then updates the message card with the findings and a suggested response. Use **Refresh context** to run the optional full Nebius/Mem0 enrichment, or set `SLACK_FAST_PATH=false` and restart for full background enrichment.
 
 To enable LLM synthesis with Nebius Token Factory, set `NEBIUS_CONTEXT_ENABLED=true`, `NEBIUS_API_KEY`, and `NEBIUS_MODEL` in the environment. The default base URL is `https://api.tokenfactory.nebius.com/v1`; set `NEBIUS_BASE_URL` to a different Nebius endpoint when needed. `LLM_*` equivalents are also supported. The default is disabled so Slack content is not sent externally until explicitly enabled. The app sends the current Slack message, locally related Slack messages, and mocked system findings to `/v1/chat/completions`, then validates the JSON response; keep the API key out of project files.
+
+### Optional hybrid RAG
+
+The application can add semantic retrieval to its existing local keyword and thread matching. When enabled, it sends message text to a configured OpenAI-compatible `/embeddings` endpoint, stores the returned vector in the local SQLite `message_embeddings` table, and merges cosine-similarity results with deterministic matches. It is opt-in and disabled by default.
+
+```dotenv
+RAG_ENABLED=true
+RAG_EMBEDDING_MODEL=your-embedding-model
+# Optional when different from the configured LLM provider
+RAG_API_KEY=your-embedding-api-key
+RAG_BASE_URL=https://your-openai-compatible-endpoint/v1
+RAG_TOP_K=6
+RAG_MIN_SIMILARITY=0.35
+```
+
+After restarting the app, index existing local Slack messages once:
+
+```bash
+curl -X POST http://127.0.0.1:8001/api/rag/reindex
+```
+
+Check progress at `http://127.0.0.1:8001/api/rag/status` or in `/api/system/status`. Live Slack ingestion stays fast because RAG is not queried on the default fast path; use **Refresh analysis** for hybrid retrieval, or set `RAG_ON_FAST_PATH=true` only if embedding latency is acceptable.
 
 Example:
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from threading import Thread
 import unittest
 from unittest.mock import patch
@@ -160,7 +161,10 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_status_configuration_is_accurate_and_does_not_expose_secrets(self):
         status, empty = self.json_request("GET", "/api/system/status")
         self.assertEqual(status, 200)
-        self.assertEqual(empty["slack"], {"configured": False, "channel_count": 0, "last_sync_at": None})
+        self.assertFalse(empty["slack"]["configured"])
+        self.assertEqual(empty["slack"]["channel_count"], 0)
+        self.assertIsNone(empty["slack"]["last_sync_at"])
+        self.assertEqual(empty["slack"]["sync"]["status"], "idle")
         self.assertEqual(empty["context"]["external_sources"], "mock")
         with patch.multiple(app, SLACK_BOT_TOKEN="secret-slack", SLACK_CHANNEL_IDS=["secret-channel"],
                             MEM0_API_KEY="secret-memory", MEM0_USER_ID="private-user", MEM0_ENABLED=True,
@@ -178,14 +182,32 @@ class ApiIntegrationTests(unittest.TestCase):
         with patch.multiple(app, SLACK_BOT_TOKEN="fake-token", SLACK_CHANNEL_IDS=["CDEMO"]):
             self.network.side_effect = None
             self.network.return_value.__enter__.return_value.read.return_value = b'{"ok": true, "messages": []}'
-            self.assertEqual(self.json_request("POST", "/api/slack/sync")[0], 200)
+            status, started = self.json_request("POST", "/api/slack/sync")
+            self.assertEqual(status, 200)
+            self.assertEqual(started["status"], "started")
+            for _ in range(50):
+                current = self.json_request("GET", "/api/system/status")[1]["slack"]
+                if current["sync"]["status"] == "completed":
+                    break
+                time.sleep(0.01)
             first = self.json_request("GET", "/api/system/status")[1]["slack"]["last_sync_at"]
             self.assertTrue(first)
             with app.connection() as database:
                 persisted = database.execute("SELECT value FROM app_settings WHERE key='slack_last_sync_at'").fetchone()[0]
             self.assertEqual(first, persisted)
             self.network.return_value.__enter__.return_value.read.return_value = b'{"ok": false, "error": "invalid_auth"}'
-            self.assertEqual(self.json_request("POST", "/api/slack/sync")[0], 503)
+            status, started = self.json_request("POST", "/api/slack/sync")
+            self.assertEqual(status, 200)
+            self.assertEqual(started["status"], "started")
+            for _ in range(50):
+                current = self.json_request("GET", "/api/system/status")[1]["slack"]
+                if current["sync"]["status"] == "failed":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(
+                self.json_request("GET", "/api/system/status")[1]["slack"]["sync"]["status"],
+                "failed",
+            )
             self.assertEqual(first, self.json_request("GET", "/api/system/status")[1]["slack"]["last_sync_at"])
 
     def test_environment_file_is_skipped_in_offline_mode(self):

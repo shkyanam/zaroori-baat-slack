@@ -70,7 +70,18 @@ export interface Message {
   decision_memory: { agent?: string; status?: string; items?: DecisionItem[] };
 }
 export interface SystemStatus {
-  slack: { configured: boolean; channel_count: number; last_sync_at: string | null };
+  slack: {
+    configured: boolean;
+    channel_count: number;
+    last_sync_at: string | null;
+    sync?: {
+      status?: string;
+      ingested?: number;
+      error?: string | null;
+      started_at?: string | null;
+      completed_at?: string | null;
+    };
+  };
   context: { enabled: boolean; external_sources: string };
   memory: { active?: boolean; enabled?: boolean; configured?: boolean };
   workflow: { engine?: string; checkpointer?: string };

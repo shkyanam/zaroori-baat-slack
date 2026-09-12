@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import mimetypes
 import os
 import re
@@ -18,11 +19,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator, TypedDict
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from langsmith import traceable
+from langsmith import Client, traceable
+from langsmith.run_helpers import tracing_context
 from langgraph.graph import END, START, StateGraph
 
 ROOT = Path(__file__).parent
@@ -71,6 +73,16 @@ LLM_CONTEXT_ENABLED = (
 ).lower() in {"1", "true", "yes", "on"}
 LLM_CONTEXT_MAX_RELATED = int(os.environ.get("LLM_CONTEXT_MAX_RELATED", "6"))
 LLM_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "60"))
+SLACK_SYNC_LIMIT = max(1, int(os.environ.get("SLACK_SYNC_LIMIT", "20")))
+SLACK_FAST_PATH = os.environ.get("SLACK_FAST_PATH", "true").lower() in {"1", "true", "yes", "on"}
+RAG_ENABLED = os.environ.get("RAG_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+RAG_ON_FAST_PATH = os.environ.get("RAG_ON_FAST_PATH", "false").lower() in {"1", "true", "yes", "on"}
+RAG_API_KEY = os.environ.get("RAG_API_KEY") or LLM_API_KEY
+RAG_BASE_URL = (os.environ.get("RAG_BASE_URL") or LLM_BASE_URL).rstrip("/")
+RAG_EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "").strip()
+RAG_TOP_K = max(1, int(os.environ.get("RAG_TOP_K", str(LLM_CONTEXT_MAX_RELATED))))
+RAG_MIN_SIMILARITY = float(os.environ.get("RAG_MIN_SIMILARITY", "0.35"))
+RAG_REQUEST_TIMEOUT_SECONDS = max(1, int(os.environ.get("RAG_REQUEST_TIMEOUT_SECONDS", "12")))
 ACTION_TYPES = ("Task", "Follow-up", "Risk", "Decision")
 MEM0_API_KEY = os.environ.get("MEM0_API_KEY", "")
 MEM0_BASE_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
@@ -89,9 +101,39 @@ LANGSMITH_ENDPOINT = os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.lan
 LANGSMITH_CAPTURE_CONTENT = os.environ.get("LANGSMITH_CAPTURE_CONTENT", "false").lower() in {
     "1", "true", "yes", "on"
 }
+SMI_DATASET_VERSION = os.environ.get("SMI_DATASET_VERSION", "v1")
+SMI_MODEL_PROVIDER = os.environ.get("SMI_MODEL_PROVIDER", "Nebius")
+SMI_MODEL_NAME = os.environ.get("SMI_MODEL_NAME") or LLM_MODEL or "not-configured"
+SMI_PROMPT_VERSION = os.environ.get("SMI_PROMPT_VERSION", "signal-context-v1")
+SMI_WORKFLOW_VERSION = os.environ.get("SMI_WORKFLOW_VERSION", "workflow-v1")
+SMI_EVALUATOR_VERSION = os.environ.get("SMI_EVALUATOR_VERSION", "eval-v1")
 if not LANGSMITH_CAPTURE_CONTENT:
     os.environ.setdefault("LANGSMITH_HIDE_INPUTS", "true")
     os.environ.setdefault("LANGSMITH_HIDE_OUTPUTS", "true")
+
+_SAFE_LANGSMITH_CLIENT: Client | None = None
+_SLACK_WORKFLOW_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-workflow")
+_SLACK_WORKFLOW_LOCK = RLock()
+_PENDING_EXTERNAL_IDS: set[str] = set()
+_SLACK_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="slack-sync")
+_SLACK_SYNC_LOCK = RLock()
+_SLACK_SYNC_STATE: dict[str, Any] = {
+    "status": "idle",
+    "ingested": 0,
+    "error": None,
+    "started_at": None,
+    "completed_at": None,
+}
+_RAG_INDEX_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-index")
+_RAG_INDEX_LOCK = RLock()
+_RAG_PENDING_MESSAGE_IDS: set[str] = set()
+_RAG_INDEX_STATE: dict[str, Any] = {
+    "status": "idle",
+    "indexed": 0,
+    "error": None,
+    "started_at": None,
+    "completed_at": None,
+}
 
 
 @dataclass
@@ -116,11 +158,16 @@ class MessageWorkflowState(TypedDict, total=False):
     thread_ts: str | None
     mention: bool
     created_at: str
+    test_id: str | None
+    evaluation_related_messages: list[dict[str, Any]]
+    mocked_context: dict[str, Any]
+    fast_path: bool
     priority_result: dict[str, Any]
     related_messages: list[dict[str, Any]]
     context: dict[str, Any]
     action_extraction: dict[str, Any]
     decision_memory: dict[str, Any]
+    router: dict[str, Any]
     message: dict[str, Any]
 
 
@@ -143,6 +190,7 @@ def trace_state_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
         return {"input_type": type(state).__name__}
     summary: dict[str, Any] = {
         "message_id": state.get("message_id"),
+        "test_id": state.get("test_id"),
         "channel": state.get("channel"),
         "thread_ts": state.get("thread_ts"),
         "classification": state.get("priority_result", {}).get("classification"),
@@ -172,9 +220,76 @@ def trace_node_outputs(output: Any) -> dict[str, Any]:
             if key == "priority_result" and isinstance(value, dict):
                 summary[key] = {
                     field: value.get(field)
-                    for field in ("priority", "classification", "score")
+                    for field in (
+                        "priority",
+                        "classification",
+                        "score",
+                        "owner",
+                        "deadline",
+                        "action_required",
+                        "confidence",
+                    )
                     if field in value
                 }
+            elif key == "context" and isinstance(value, dict):
+                summary[key] = {
+                    field: value.get(field)
+                    for field in ("agent", "status", "confidence")
+                    if field in value
+                }
+                related_ids = value.get("related_message_ids")
+                if isinstance(related_ids, list):
+                    summary[key]["related_message_ids"] = [str(item) for item in related_ids if item]
+                elif "related_message_ids" in value:
+                    summary[key]["related_message_ids"] = value["related_message_ids"]
+                related_messages = value.get("related_messages")
+                if isinstance(related_messages, list):
+                    summary[key]["related_message_count"] = len(related_messages)
+                elif "related_message_count" in value:
+                    summary[key]["related_message_count"] = value["related_message_count"]
+                sources = value.get("sources")
+                if isinstance(sources, list):
+                    summary[key]["source_names"] = [
+                        str(item.get("name"))
+                        for item in sources
+                        if isinstance(item, dict) and item.get("name")
+                    ]
+                elif "source_names" in value:
+                    summary[key]["source_names"] = value["source_names"]
+                open_questions = value.get("open_questions")
+                if isinstance(open_questions, list):
+                    summary[key]["open_questions_count"] = len(open_questions)
+                elif "open_questions_count" in value:
+                    summary[key]["open_questions_count"] = value["open_questions_count"]
+                key_facts = value.get("key_facts")
+                if isinstance(key_facts, list):
+                    summary[key]["key_facts_count"] = len(key_facts)
+                elif "key_facts_count" in value:
+                    summary[key]["key_facts_count"] = value["key_facts_count"]
+                summary[key]["briefing_present"] = (
+                    bool(value["briefing"]) if "briefing" in value else bool(value.get("briefing_present"))
+                )
+                summary[key]["suggested_response_present"] = (
+                    bool(value["suggested_response"])
+                    if "suggested_response" in value
+                    else bool(value.get("suggested_response_present"))
+                )
+            elif key in {"action_extraction", "decision_memory"} and isinstance(value, dict):
+                summary[key] = {
+                    field: value.get(field)
+                    for field in ("agent", "status", "confidence")
+                    if field in value
+                }
+                items = value.get("items")
+                if isinstance(items, list):
+                    summary[key]["items_count"] = len(items)
+                    summary[key]["item_fields"] = sorted(
+                        {field for item in items if isinstance(item, dict) for field in item}
+                    )
+                else:
+                    for field in ("items_count", "item_fields"):
+                        if field in value:
+                            summary[key][field] = value[field]
             elif isinstance(value, dict):
                 summary[key] = {
                     field: value.get(field)
@@ -189,6 +304,101 @@ def trace_node_outputs(output: Any) -> dict[str, Any]:
         elif key not in {"text", "briefing", "suggested_response", "memory", "title", "decision"}:
             summary[key] = value
     return summary
+
+
+def safe_trace_outputs(output: Any) -> dict[str, Any]:
+    """Redact unprocessed trace output while retaining safe agent summaries."""
+    if LANGSMITH_CAPTURE_CONTENT:
+        return output if isinstance(output, dict) else {"output": output}
+    if not isinstance(output, dict):
+        return {"output_type": type(output).__name__}
+
+    priority_fields = {
+        "priority",
+        "classification",
+        "score",
+        "owner",
+        "deadline",
+        "action_required",
+        "confidence",
+    }
+    context_fields = {
+        "agent",
+        "status",
+        "confidence",
+        "related_message_ids",
+        "related_message_count",
+        "source_names",
+        "open_questions_count",
+        "key_facts_count",
+        "briefing_present",
+        "suggested_response_present",
+    }
+    item_fields = {"agent", "status", "confidence", "items_count", "item_fields"}
+    router_fields = {"autonomous_action", "human_review", "workflow_status", "terminal_state"}
+    safe_output: dict[str, Any] = {}
+    for key, value in output.items():
+        if key == "message" and isinstance(value, dict):
+            safe_output[key] = {
+                field: value.get(field)
+                for field in ("id", "priority", "classification", "score")
+                if field in value
+            }
+        elif key == "priority_result" and isinstance(value, dict):
+            safe_output[key] = {field: value.get(field) for field in priority_fields if field in value}
+        elif key == "context" and isinstance(value, dict):
+            safe_output[key] = {field: value.get(field) for field in context_fields if field in value}
+            if isinstance(value.get("related_messages"), list):
+                safe_output[key]["related_message_count"] = len(value["related_messages"])
+            if isinstance(value.get("sources"), list):
+                safe_output[key]["source_names"] = [
+                    str(item.get("name"))
+                    for item in value["sources"]
+                    if isinstance(item, dict) and item.get("name")
+                ]
+            if isinstance(value.get("open_questions"), list):
+                safe_output[key]["open_questions_count"] = len(value["open_questions"])
+            if isinstance(value.get("key_facts"), list):
+                safe_output[key]["key_facts_count"] = len(value["key_facts"])
+            if "briefing" in value:
+                safe_output[key]["briefing_present"] = bool(value["briefing"])
+            if "suggested_response" in value:
+                safe_output[key]["suggested_response_present"] = bool(value["suggested_response"])
+        elif key in {"action_extraction", "decision_memory"} and isinstance(value, dict):
+            safe_output[key] = {field: value.get(field) for field in item_fields if field in value}
+            if isinstance(value.get("items"), list):
+                safe_output[key]["items_count"] = len(value["items"])
+                safe_output[key]["item_fields"] = sorted(
+                    {field for item in value["items"] if isinstance(item, dict) for field in item}
+                )
+        elif key == "router" and isinstance(value, dict):
+            safe_output[key] = {field: value.get(field) for field in router_fields if field in value}
+        elif key == "related_messages" and isinstance(value, list):
+            safe_output["related_messages_count"] = len(value)
+        elif key.endswith("_count") or key in {
+            "message_id",
+            "test_id",
+            "channel",
+            "thread_ts",
+            "run_id",
+            "output_type",
+            "result_type",
+            "has_result",
+        }:
+            safe_output[key] = value
+    return safe_output
+
+
+def get_safe_langsmith_client() -> Client:
+    """Return a client that never uploads raw inputs or unprocessed outputs."""
+    global _SAFE_LANGSMITH_CLIENT
+    if _SAFE_LANGSMITH_CLIENT is None:
+        _SAFE_LANGSMITH_CLIENT = Client(
+            hide_inputs=True,
+            hide_outputs=safe_trace_outputs,
+            hide_metadata=False,
+        )
+    return _SAFE_LANGSMITH_CLIENT
 
 
 def trace_llm_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
@@ -227,7 +437,7 @@ def trace_mem0_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
 
 
 ACTION_TERMS = re.compile(r"\b(please|need|needs|review|approve|confirm|respond|reply|send|fix|blocker|follow up|follow-up|assign|action)\b", re.I)
-URGENCY_TERMS = re.compile(r"\b(urgent|asap|today|tonight|eod|deadline|blocked|blocking|critical|production|incident|by \d)\b", re.I)
+URGENCY_TERMS = re.compile(r"\b(urgent|asap|today|tonight|eod|deadline|blocked|blocking|critical|production(?![-\s]?scale\b)|incident|by \d)\b", re.I)
 LOW_VALUE_TERMS = re.compile(r"\b(fyi|lunch|happy birthday|welcome|random|newsletter|announcement)\b", re.I)
 CLASSIFICATIONS = (
     "FYI",
@@ -241,7 +451,7 @@ CLASSIFICATIONS = (
 APPROVAL_TERMS = re.compile(r"\b(approve|approved|approval|sign[- ]?off|authorize|authorise|permission)\b", re.I)
 ESCALATION_TERMS = re.compile(r"\b(escalate|escalation|raise this|leadership|manager|executive)\b", re.I)
 INCIDENT_TERMS = re.compile(
-    r"\b(incident|outage|downtime|sev[ -]?[0-9]|production|prod|blocked|blocking|broken|failure|failed|failing|bug|error|degraded|rollback|hotfix)\b",
+    r"\b(incident|outage|downtime|sev[ -]?[0-9]|production(?![-\s]?scale\b)|prod|blocked|blocking|broken|failure|failed|failing|bug|error|degraded|rollback|hotfix)\b",
     re.I,
 )
 DECISION_TERMS = re.compile(r"\b(decision|decide|choose|choice|select|pick|recommendation|vote)\b", re.I)
@@ -287,7 +497,12 @@ def classify_message(text: str) -> str:
     return "FYI"
 
 
-def build_mock_context(text: str, classification: str, related_messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def build_mock_context(
+    text: str,
+    classification: str,
+    related_messages: list[dict[str, Any]] | None = None,
+    mocked_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return deterministic fallback findings when external context services are unavailable."""
     normalized = " ".join(text.split())
     related_messages = related_messages or []
@@ -333,18 +548,28 @@ def build_mock_context(text: str, classification: str, related_messages: list[di
     else:
         suggested_response = "I found related context and can follow up with the owner."
 
+    sources = [
+        {"name": "ADO", "detail": work_item},
+        {"name": "Build history", "detail": latest_update if has_report or has_build else "No matching build found in the mocked history."},
+        {"name": "Incident system", "detail": active_incidents},
+        {"name": "Related PRs", "detail": related_pr},
+        {"name": "Previous discussions", "detail": previous_discussion},
+    ]
+    if isinstance(mocked_context, dict):
+        sources.extend(
+            {"name": str(name), "detail": value}
+            for name, value in mocked_context.items()
+            if value not in (None, "", [], {})
+        )
+
     return {
         "agent": "mock",
         "status": "complete",
         "summary": "Context enriched from mocked ADO, build history, incident system, related PRs, and previous discussions.",
         "briefing": briefing,
-        "sources": [
-            {"name": "ADO", "detail": work_item},
-            {"name": "Build history", "detail": latest_update if has_report or has_build else "No matching build found in the mocked history."},
-            {"name": "Incident system", "detail": active_incidents},
-            {"name": "Related PRs", "detail": related_pr},
-            {"name": "Previous discussions", "detail": previous_discussion},
-        ],
+        "key_facts": [],
+        "open_questions": [],
+        "sources": sources,
         "related_work_item": work_item,
         "latest_update": latest_update,
         "active_incidents": active_incidents,
@@ -352,6 +577,7 @@ def build_mock_context(text: str, classification: str, related_messages: list[di
         "previous_discussions": previous_discussion,
         "suggested_response": suggested_response,
         "related_messages": related_messages,
+        "related_message_ids": [str(message["id"]) for message in related_messages if message.get("id")],
     }
 
 
@@ -370,13 +596,80 @@ def message_references(text: str) -> set[str]:
     return {reference.lower() for reference in references}
 
 
-def find_related_messages(
+def rag_is_active() -> bool:
+    """RAG is opt-in and requires an OpenAI-compatible embedding endpoint."""
+    return bool(RAG_ENABLED and RAG_API_KEY and RAG_BASE_URL and RAG_EMBEDDING_MODEL)
+
+
+def rag_embeddings_url() -> str:
+    return RAG_BASE_URL + "/embeddings"
+
+
+def rag_status() -> dict[str, Any]:
+    """Return safe RAG configuration and indexing state without credentials."""
+    with _RAG_INDEX_LOCK:
+        state = dict(_RAG_INDEX_STATE)
+        state["pending"] = len(_RAG_PENDING_MESSAGE_IDS)
+    indexed = 0
+    try:
+        with connection() as database:
+            indexed = int(database.execute("SELECT COUNT(*) FROM message_embeddings").fetchone()[0])
+    except sqlite3.OperationalError:
+        pass
+    return {
+        "enabled": RAG_ENABLED,
+        "configured": bool(RAG_API_KEY and RAG_BASE_URL and RAG_EMBEDDING_MODEL),
+        "active": rag_is_active(),
+        "model": RAG_EMBEDDING_MODEL or None,
+        "top_k": RAG_TOP_K,
+        "min_similarity": RAG_MIN_SIMILARITY,
+        "on_fast_path": RAG_ON_FAST_PATH,
+        "indexed_messages": indexed,
+        "index": state,
+    }
+
+
+def fetch_rag_embedding(text: str) -> list[float] | None:
+    """Create one embedding through a configured OpenAI-compatible endpoint."""
+    if not rag_is_active() or not text.strip():
+        return None
+    request = Request(
+        rag_embeddings_url(),
+        data=json.dumps({"model": RAG_EMBEDDING_MODEL, "input": text[:12000]}).encode(),
+        headers={"Authorization": f"Bearer {RAG_API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=RAG_REQUEST_TIMEOUT_SECONDS) as response:
+            result = json.loads(response.read())
+        data = result.get("data") if isinstance(result, dict) else None
+        embedding = data[0].get("embedding") if isinstance(data, list) and data and isinstance(data[0], dict) else None
+        if not isinstance(embedding, list) or not embedding:
+            return None
+        vector = [float(value) for value in embedding]
+        return vector if all(math.isfinite(value) for value in vector) else None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        print(f"RAG embedding unavailable; using lexical retrieval: {error}")
+        return None
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+
+
+def lexical_related_messages(
     text: str,
     channel: str | None = None,
     thread_ts: str | None = None,
     exclude_message_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Retrieve likely related Slack messages from the locally synced Slack history."""
+    """Retrieve related Slack messages with deterministic term and thread matching."""
     terms = message_terms(text)
     references = message_references(text)
     with connection() as database:
@@ -427,6 +720,173 @@ def find_related_messages(
             }
         )
     return related
+
+
+def semantic_related_messages(
+    text: str,
+    channel: str | None = None,
+    thread_ts: str | None = None,
+    exclude_message_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Retrieve semantically related local messages from the SQLite embedding index."""
+    query_embedding = fetch_rag_embedding(text)
+    if query_embedding is None:
+        return []
+    with connection() as database:
+        rows = database.execute(
+            """
+            SELECT messages.id, messages.channel, messages.sender, messages.text,
+                   messages.classification, messages.created_at, messages.thread_ts,
+                   message_embeddings.embedding_json
+            FROM message_embeddings
+            JOIN messages ON messages.id = message_embeddings.message_id
+            WHERE message_embeddings.model = ? AND (? IS NULL OR messages.id != ?)
+            ORDER BY messages.created_at DESC
+            LIMIT 250
+            """,
+            (RAG_EMBEDDING_MODEL, exclude_message_id, exclude_message_id),
+        ).fetchall()
+    matches: list[tuple[float, sqlite3.Row]] = []
+    for row in rows:
+        try:
+            candidate_embedding = [float(value) for value in json.loads(row[7])]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        score = cosine_similarity(query_embedding, candidate_embedding)
+        if score < RAG_MIN_SIMILARITY:
+            continue
+        if thread_ts and row[6] == thread_ts:
+            score += 0.08
+        elif channel and row[1] == channel:
+            score += 0.03
+        matches.append((score, row))
+    matches.sort(key=lambda match: (match[0], match[1][5]), reverse=True)
+    return [
+        {
+            "id": row[0],
+            "channel": row[1],
+            "sender": row[2],
+            "text": row[3][:400],
+            "classification": row[4],
+            "created_at": row[5],
+            "relationship": "Semantic similarity (RAG)",
+            "match_score": round(score * 100, 1),
+        }
+        for score, row in matches[:RAG_TOP_K]
+    ]
+
+
+def find_related_messages(
+    text: str,
+    channel: str | None = None,
+    thread_ts: str | None = None,
+    exclude_message_id: str | None = None,
+    use_rag: bool = True,
+) -> list[dict[str, Any]]:
+    """Merge deterministic matching with optional semantic retrieval from local embeddings."""
+    lexical = lexical_related_messages(text, channel, thread_ts, exclude_message_id)
+    if not (use_rag and rag_is_active()):
+        return lexical
+    merged = {str(message["id"]): dict(message) for message in lexical}
+    for semantic in semantic_related_messages(text, channel, thread_ts, exclude_message_id):
+        existing = merged.get(str(semantic["id"]))
+        if existing is None:
+            merged[str(semantic["id"])] = semantic
+            continue
+        existing["match_score"] = max(float(existing["match_score"]), float(semantic["match_score"]))
+        if "RAG" not in existing["relationship"]:
+            existing["relationship"] += " + semantic RAG"
+    return sorted(
+        merged.values(),
+        key=lambda message: (float(message["match_score"]), str(message["created_at"])),
+        reverse=True,
+    )[:RAG_TOP_K]
+
+
+def index_message_for_rag(message_id: str, text: str) -> bool:
+    """Persist one message embedding locally. Never raises into the Slack workflow."""
+    embedding = fetch_rag_embedding(text)
+    if embedding is None:
+        return False
+    with connection() as database:
+        database.execute(
+            """
+            INSERT INTO message_embeddings (message_id, embedding_json, model, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                embedding_json = excluded.embedding_json,
+                model = excluded.model,
+                created_at = excluded.created_at
+            """,
+            (message_id, json.dumps(embedding), RAG_EMBEDDING_MODEL, utc_now()),
+        )
+        database.commit()
+    return True
+
+
+def _index_message_for_rag_background(message_id: str, text: str) -> None:
+    try:
+        index_message_for_rag(message_id, text)
+    finally:
+        with _RAG_INDEX_LOCK:
+            _RAG_PENDING_MESSAGE_IDS.discard(message_id)
+
+
+def schedule_rag_index(message_id: str, text: str) -> None:
+    """Index after persistence so webhook acknowledgement and fast-path UI remain quick."""
+    if not rag_is_active():
+        return
+    with _RAG_INDEX_LOCK:
+        if message_id in _RAG_PENDING_MESSAGE_IDS:
+            return
+        _RAG_PENDING_MESSAGE_IDS.add(message_id)
+    try:
+        _RAG_INDEX_EXECUTOR.submit(_index_message_for_rag_background, message_id, text)
+    except RuntimeError:
+        with _RAG_INDEX_LOCK:
+            _RAG_PENDING_MESSAGE_IDS.discard(message_id)
+
+
+def _run_rag_reindex() -> None:
+    indexed = 0
+    failed = 0
+    try:
+        with connection() as database:
+            rows = database.execute("SELECT id, text FROM messages ORDER BY created_at ASC").fetchall()
+        for row in rows:
+            if index_message_for_rag(str(row[0]), str(row[1])):
+                indexed += 1
+            else:
+                failed += 1
+    except Exception as error:  # noqa: BLE001
+        with _RAG_INDEX_LOCK:
+            _RAG_INDEX_STATE.update(
+                {"status": "failed", "indexed": indexed, "error": type(error).__name__, "completed_at": utc_now()}
+            )
+        return
+    with _RAG_INDEX_LOCK:
+        _RAG_INDEX_STATE.update(
+            {
+                "status": "completed" if not failed else "partial",
+                "indexed": indexed,
+                "error": None if not failed else f"{failed} embeddings unavailable",
+                "completed_at": utc_now(),
+            }
+        )
+
+
+def start_rag_reindex() -> dict[str, Any]:
+    """Start a non-blocking index build for messages already stored locally."""
+    if not rag_is_active():
+        raise RuntimeError("Set RAG_ENABLED=true, RAG_EMBEDDING_MODEL, and an embedding API key before reindexing")
+    with _RAG_INDEX_LOCK:
+        if _RAG_INDEX_STATE["status"] == "running":
+            return {"ok": True, "status": "already_running"}
+        _RAG_INDEX_STATE.update(
+            {"status": "running", "indexed": 0, "error": None, "started_at": utc_now(), "completed_at": None}
+        )
+        _RAG_INDEX_EXECUTOR.submit(_run_rag_reindex)
+    return {"ok": True, "status": "started"}
 
 
 def action_source_label(channel: str | None, thread_ts: str | None) -> str:
@@ -1278,9 +1738,13 @@ def synthesize_context(
     text: str,
     classification: str,
     related_messages: list[dict[str, Any]],
+    mocked_context: dict[str, Any] | None = None,
+    use_llm: bool = True,
 ) -> dict[str, Any]:
     """Build system findings and optionally synthesize them with Nebius."""
-    context = build_mock_context(text, classification, related_messages)
+    context = build_mock_context(text, classification, related_messages, mocked_context)
+    if not use_llm:
+        return context
     llm_result = call_llm_context_agent(text, classification, related_messages, context)
     if llm_result:
         related_ids = set(llm_result["related_message_ids"])
@@ -1409,6 +1873,19 @@ def initialize_database() -> None:
                 error TEXT
             )
             """
+        )
+        database.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_embeddings (
+                message_id TEXT PRIMARY KEY,
+                embedding_json TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        database.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_embeddings_model ON message_embeddings(model)"
         )
         database.execute(
             "CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at ON workflow_runs(started_at DESC)"
@@ -1831,7 +2308,7 @@ def get_langgraph_checkpointer() -> Any:
 
 
 @traceable(
-    name="Classify Slack message",
+    name="Signal Detection Agent",
     process_inputs=trace_state_inputs,
     process_outputs=trace_node_outputs,
 )
@@ -1845,29 +2322,37 @@ def workflow_classify_node(state: MessageWorkflowState) -> dict[str, Any]:
             "summary": result.summary,
             "reason": result.reason,
             "suggested_action": result.suggested_action,
+            "owner": extract_owner(state["text"]),
+            "deadline": extract_due(state["text"]),
+            "action_required": result.classification != "FYI",
+            "confidence": 0.95,
         }
     }
 
 
 @traceable(
-    name="Find related Slack messages",
+    name="Related Message Retrieval",
     run_type="retriever",
     process_inputs=trace_state_inputs,
     process_outputs=trace_node_outputs,
 )
 def workflow_related_messages_node(state: MessageWorkflowState) -> dict[str, Any]:
+    evaluation_messages = state.get("evaluation_related_messages")
+    if isinstance(evaluation_messages, list):
+        return {"related_messages": evaluation_messages}
     return {
         "related_messages": find_related_messages(
             state["text"],
             state.get("channel"),
             state.get("thread_ts"),
             state.get("message_id"),
+            use_rag=not state.get("fast_path", False) or RAG_ON_FAST_PATH,
         )
     }
 
 
 @traceable(
-    name="Context enrichment",
+    name="Context Enrichment Agent",
     process_inputs=trace_state_inputs,
     process_outputs=trace_node_outputs,
 )
@@ -1877,12 +2362,14 @@ def workflow_context_node(state: MessageWorkflowState) -> dict[str, Any]:
             state["text"],
             state["priority_result"]["classification"],
             state.get("related_messages", []),
+            state.get("mocked_context"),
+            use_llm=not state.get("fast_path", False),
         )
     }
 
 
 @traceable(
-    name="Action extraction",
+    name="Action Extraction Agent",
     process_inputs=trace_state_inputs,
     process_outputs=trace_node_outputs,
 )
@@ -1895,12 +2382,13 @@ def workflow_action_node(state: MessageWorkflowState) -> dict[str, Any]:
             state.get("related_messages", []),
             state.get("context", {}),
             state.get("message_id"),
+            use_llm=not state.get("fast_path", False),
         )
     }
 
 
 @traceable(
-    name="Decision memory extraction",
+    name="Decision Memory Agent",
     process_inputs=trace_state_inputs,
     process_outputs=trace_node_outputs,
 )
@@ -1914,7 +2402,29 @@ def workflow_decision_node(state: MessageWorkflowState) -> dict[str, Any]:
             state.get("context", {}),
             state.get("message_id"),
             state.get("created_at"),
+            use_llm=not state.get("fast_path", False),
         )
+    }
+
+
+@traceable(
+    name="Router",
+    process_inputs=trace_state_inputs,
+    process_outputs=trace_node_outputs,
+)
+def workflow_router_node(state: MessageWorkflowState) -> dict[str, Any]:
+    """Record the terminal safety decision as an explicit traced workflow stage."""
+    priority = state.get("priority_result", {})
+    classification = priority.get("classification")
+    priority_value = priority.get("priority")
+    human_review = classification in {"Incident", "Escalation", "Approval Request", "Decision Needed"} or priority_value == "high"
+    return {
+        "router": {
+            "autonomous_action": "NONE",
+            "human_review": human_review,
+            "workflow_status": "COMPLETED",
+            "terminal_state": "COMPLETED",
+        }
     }
 
 
@@ -1979,19 +2489,29 @@ def persist_workflow_message(state: MessageWorkflowState) -> dict[str, Any]:
             )
         database.commit()
 
-    decision_memory = ensure_mem0_decision_memory(
-        decision_memory,
-        state.get("channel"),
-        state.get("thread_ts"),
-        message_id,
-        state.get("created_at"),
-    )
+    if state.get("fast_path"):
+        decision_memory = dict(decision_memory)
+        decision_memory["memory_store"] = {
+            "provider": "mem0",
+            "status": "deferred",
+            "stored": False,
+            "items": [],
+        }
+    else:
+        decision_memory = ensure_mem0_decision_memory(
+            decision_memory,
+            state.get("channel"),
+            state.get("thread_ts"),
+            message_id,
+            state.get("created_at"),
+        )
     with connection() as database:
         database.execute(
             "UPDATE messages SET decision_memory_json = ? WHERE id = ?",
             (json.dumps(decision_memory), message_id),
         )
         database.commit()
+    schedule_rag_index(message_id, state["text"])
     return {"message": get_message(message_id), "decision_memory": decision_memory}
 
 
@@ -2018,6 +2538,7 @@ def get_message_workflow() -> Any:
         builder.add_node("action_extraction", workflow_action_node)
         builder.add_node("decision_memory", workflow_decision_node)
         builder.add_node("persist", workflow_persist_node)
+        builder.add_node("router", workflow_router_node)
         builder.add_edge(START, "classify")
         builder.add_edge("classify", "related_messages")
         builder.add_edge("related_messages", "context_enrichment")
@@ -2025,7 +2546,8 @@ def get_message_workflow() -> Any:
         builder.add_edge("context_enrichment", "decision_memory")
         builder.add_edge("action_extraction", "persist")
         builder.add_edge("decision_memory", "persist")
-        builder.add_edge("persist", END)
+        builder.add_edge("persist", "router")
+        builder.add_edge("router", END)
         _LANGGRAPH_GRAPH = builder.compile(checkpointer=get_langgraph_checkpointer())
         return _LANGGRAPH_GRAPH
 
@@ -2040,6 +2562,10 @@ def run_message_workflow(
     message_id: str | None = None,
     created_at: str | None = None,
     run_id: str | None = None,
+    test_id: str | None = None,
+    evaluation_related_messages: list[dict[str, Any]] | None = None,
+    mocked_context: dict[str, Any] | None = None,
+    fast_path: bool = False,
 ) -> dict[str, Any]:
     message_id = message_id or str(uuid.uuid4())
     created_at = created_at or utc_now()
@@ -2053,24 +2579,61 @@ def run_message_workflow(
         "thread_ts": thread_ts,
         "mention": mention,
         "created_at": created_at,
+        "test_id": test_id,
+        "fast_path": fast_path,
     }
+    if evaluation_related_messages is not None:
+        workflow_state["evaluation_related_messages"] = evaluation_related_messages
+    if mocked_context is not None:
+        workflow_state["mocked_context"] = mocked_context
     workflow_run_id = workflow_state["run_id"]
     started = time.perf_counter()
     record_workflow_start(workflow_run_id, message_id, channel)
     try:
-        result = get_message_workflow().invoke(
-            workflow_state,
-            {
-                "configurable": {"thread_id": workflow_run_id},
-                "run_name": "Slack message workflow",
-                "tags": ["zaroori-baat", "slack", "message-workflow"],
-                "metadata": {
-                    "workflow_version": "1",
-                    "message_id": message_id,
-                    "channel": channel,
-                },
-            },
-        )
+        trace_metadata = {
+            "workflow_version": SMI_WORKFLOW_VERSION,
+            "message_id": message_id,
+            "channel": channel,
+        }
+        trace_tags = ["zaroori-baat", "slack", "message-workflow"]
+        run_name = "Slack message workflow"
+        if test_id:
+            trace_metadata.update(
+                {
+                    "test_id": test_id,
+                    "dataset_version": SMI_DATASET_VERSION,
+                    "model_provider": SMI_MODEL_PROVIDER,
+                    "model_name": SMI_MODEL_NAME,
+                    "prompt_version": SMI_PROMPT_VERSION,
+                    "evaluator_version": SMI_EVALUATOR_VERSION,
+                }
+            )
+            trace_tags.append("smi-eval")
+            run_name = f"smi-eval-{test_id}"
+        invoke_config = {
+            "configurable": {"thread_id": workflow_run_id},
+            "run_name": run_name,
+            "tags": trace_tags,
+            "metadata": trace_metadata,
+        }
+        if LANGSMITH_TRACING and LANGSMITH_API_KEY and not LANGSMITH_CAPTURE_CONTENT:
+            with tracing_context(
+                client=get_safe_langsmith_client(),
+                project_name=LANGSMITH_PROJECT,
+            ):
+                result = get_message_workflow().invoke(
+                    workflow_state,
+                    invoke_config,
+                    # Avoid sending the full graph state (which contains Slack
+                    # text) as the root trace output.
+                    output_keys=["router"],
+                )
+        else:
+            result = get_message_workflow().invoke(
+                workflow_state,
+                invoke_config,
+                output_keys=["router"],
+            )
     except Exception as error:  # noqa: BLE001
         record_workflow_finish(
             workflow_run_id,
@@ -2079,13 +2642,21 @@ def run_message_workflow(
             error=type(error).__name__,
         )
         raise
+    message = result.get("message") if isinstance(result, dict) else None
+    if not isinstance(message, dict):
+        message = get_message(message_id)
     record_workflow_finish(
         workflow_run_id,
         "completed",
         int((time.perf_counter() - started) * 1000),
-        result,
+        {
+            "priority_result": {"classification": message.get("classification")},
+            "context": message.get("context", {}),
+            "action_extraction": message.get("action_extraction", {}),
+            "decision_memory": message.get("decision_memory", {}),
+        },
     )
-    return result["message"]
+    return message
 
 
 def create_message(
@@ -2114,6 +2685,159 @@ def create_message(
         message_id,
         created_at,
     )
+
+
+def _insert_queued_message(
+    text: str,
+    sender: str,
+    channel: str,
+    external_id: str,
+    mention: bool,
+    thread_ts: str | None,
+) -> tuple[str, bool]:
+    """Persist a lightweight inbox row before slow enrichment starts."""
+    with connection() as database:
+        existing = database.execute(
+            "SELECT id FROM messages WHERE external_id = ?", (external_id,)
+        ).fetchone()
+        if existing:
+            return str(existing[0]), False
+
+        result = prioritize_message(text, mention)
+        message_id = str(uuid.uuid4())
+        queued_context = {
+            "agent": "queued",
+            "status": "queued",
+            "briefing": "Context enrichment is processing.",
+            "key_facts": [],
+            "open_questions": [],
+            "sources": [],
+            "suggested_response": "",
+            "related_messages": [],
+        }
+        queued_actions = {"agent": "queued", "status": "queued", "items": []}
+        database.execute(
+            """
+            INSERT INTO messages (
+                id, external_id, channel, thread_ts, sender, text, priority,
+                classification, context_json, actions_json, decision_memory_json,
+                score, summary, reason, suggested_action, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                external_id,
+                channel,
+                thread_ts,
+                sender,
+                text,
+                result.priority,
+                result.classification,
+                json.dumps(queued_context),
+                json.dumps(queued_actions),
+                result.score,
+                result.summary,
+                result.reason,
+                result.suggested_action,
+                utc_now(),
+            ),
+        )
+        database.commit()
+    return message_id, True
+
+
+def _process_queued_message(
+    text: str,
+    sender: str,
+    channel: str,
+    external_id: str,
+    mention: bool,
+    thread_ts: str | None,
+    message_id: str,
+    created_at: str,
+) -> None:
+    try:
+        run_message_workflow(
+            text,
+            sender,
+            channel,
+            external_id,
+            mention,
+            thread_ts,
+            message_id,
+            created_at,
+            fast_path=SLACK_FAST_PATH,
+        )
+    except Exception as error:  # noqa: BLE001
+        with connection() as database:
+            database.execute(
+                """
+                UPDATE messages
+                SET context_json = ?, actions_json = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(
+                        {
+                            "agent": "queued",
+                            "status": "failed",
+                            "briefing": "Message processing failed; retry context enrichment.",
+                            "error": type(error).__name__,
+                            "related_messages": [],
+                        }
+                    ),
+                    json.dumps({"agent": "queued", "status": "failed", "items": []}),
+                    message_id,
+                ),
+            )
+            database.commit()
+    finally:
+        with _SLACK_WORKFLOW_LOCK:
+            _PENDING_EXTERNAL_IDS.discard(external_id)
+
+
+def enqueue_slack_message(
+    text: str,
+    sender: str,
+    channel: str,
+    external_id: str,
+    mention: bool = False,
+    thread_ts: str | None = None,
+) -> dict[str, Any]:
+    """Show a Slack message immediately and enrich it in the background."""
+    with _SLACK_WORKFLOW_LOCK:
+        with connection() as database:
+            existing = database.execute(
+                "SELECT id FROM messages WHERE external_id = ?", (external_id,)
+            ).fetchone()
+        if existing:
+            return {"id": str(existing[0]), "status": "duplicate"}
+        if external_id in _PENDING_EXTERNAL_IDS:
+            return {"status": "already_queued"}
+        _PENDING_EXTERNAL_IDS.add(external_id)
+        try:
+            message_id, created = _insert_queued_message(
+                text, sender, channel, external_id, mention, thread_ts
+            )
+            if not created:
+                _PENDING_EXTERNAL_IDS.discard(external_id)
+                return {"id": message_id, "status": "duplicate"}
+            created_at = utc_now()
+            _SLACK_WORKFLOW_EXECUTOR.submit(
+                _process_queued_message,
+                text,
+                sender,
+                channel,
+                external_id,
+                mention,
+                thread_ts,
+                message_id,
+                created_at,
+            )
+        except Exception:
+            _PENDING_EXTERNAL_IDS.discard(external_id)
+            raise
+    return {"id": message_id, "status": "queued"}
 
 
 def message_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2210,16 +2934,47 @@ def ingest_slack_event(payload: dict[str, Any]) -> list[dict[str, Any]]:
     sender = str(event.get("user", "Slack user"))
     channel = str(event.get("channel", "Slack channel"))
     event_id = str(payload.get("event_id") or event.get("client_msg_id") or uuid.uuid4())
-    return [create_message(text, sender, channel, event_id, mention, event.get("thread_ts"))]
+    return [
+        enqueue_slack_message(
+            text,
+            sender,
+            channel,
+            event_id,
+            mention,
+            event.get("thread_ts"),
+        )
+    ]
+
+
+def slack_sync_status() -> dict[str, Any]:
+    """Return safe status for the background Slack history sync."""
+    with _SLACK_SYNC_LOCK:
+        state = dict(_SLACK_SYNC_STATE)
+        state["pending"] = len(_PENDING_EXTERNAL_IDS)
+        return state
 
 
 def sync_slack_history() -> int:
     if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_IDS:
         raise RuntimeError("SLACK_BOT_TOKEN and SLACK_CHANNEL_IDS are required for Sync Slack")
+    oldest: str | None = None
+    with connection() as database:
+        last_sync = database.execute(
+            "SELECT value FROM app_settings WHERE key = 'slack_last_sync_at'"
+        ).fetchone()
+    if last_sync and last_sync[0]:
+        try:
+            oldest = str(datetime.fromisoformat(last_sync[0].replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            oldest = None
+
     count = 0
     for channel_id in SLACK_CHANNEL_IDS:
+        query = {"limit": str(SLACK_SYNC_LIMIT), "channel": channel_id}
+        if oldest:
+            query["oldest"] = oldest
         request = Request(
-            "https://slack.com/api/conversations.history?limit=50&channel=" + channel_id,
+            "https://slack.com/api/conversations.history?" + urlencode(query),
             headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
         )
         with urlopen(request, timeout=15) as response:
@@ -2229,13 +2984,17 @@ def sync_slack_history() -> int:
         for message in result.get("messages", []):
             if message.get("subtype") or not message.get("text"):
                 continue
-            create_message(
-                message["text"], message.get("user", "Slack user"), channel_id,
-                message.get("client_msg_id") or f"history-{channel_id}-{message.get('ts')}",
+            external_id = message.get("client_msg_id") or f"history-{channel_id}-{message.get('ts')}"
+            queued = enqueue_slack_message(
+                message["text"],
+                message.get("user", "Slack user"),
+                channel_id,
+                external_id,
                 "<@" in message["text"],
                 message.get("thread_ts"),
             )
-            count += 1
+            if queued.get("status") == "queued":
+                count += 1
     with connection() as database:
         database.execute(
             "INSERT INTO app_settings (key, value) VALUES ('slack_last_sync_at', ?) "
@@ -2244,6 +3003,57 @@ def sync_slack_history() -> int:
         )
         database.commit()
     return count
+
+
+def _run_background_slack_sync() -> None:
+    try:
+        ingested = sync_slack_history()
+    except Exception as error:  # noqa: BLE001
+        with _SLACK_SYNC_LOCK:
+            _SLACK_SYNC_STATE.update(
+                {
+                    "status": "failed",
+                    "error": type(error).__name__,
+                    "completed_at": utc_now(),
+                }
+            )
+        return
+    with _SLACK_SYNC_LOCK:
+        _SLACK_SYNC_STATE.update({"status": "processing", "ingested": ingested})
+    while True:
+        with _SLACK_SYNC_LOCK:
+            if not _PENDING_EXTERNAL_IDS:
+                break
+        time.sleep(0.25)
+    with _SLACK_SYNC_LOCK:
+        _SLACK_SYNC_STATE.update(
+            {
+                "status": "completed",
+                "ingested": ingested,
+                "error": None,
+                "completed_at": utc_now(),
+            }
+        )
+
+
+def start_slack_sync() -> dict[str, Any]:
+    """Start one non-blocking Slack history sync and report its safe status."""
+    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_IDS:
+        raise RuntimeError("SLACK_BOT_TOKEN and SLACK_CHANNEL_IDS are required for Sync Slack")
+    with _SLACK_SYNC_LOCK:
+        if _SLACK_SYNC_STATE["status"] in {"running", "processing"}:
+            return {"ok": True, "status": "already_running", "ingested": 0}
+        _SLACK_SYNC_STATE.update(
+            {
+                "status": "running",
+                "ingested": 0,
+                "error": None,
+                "started_at": utc_now(),
+                "completed_at": None,
+            }
+        )
+        _SLACK_SYNC_EXECUTOR.submit(_run_background_slack_sync)
+    return {"ok": True, "status": "started", "ingested": 0}
 
 
 def system_status() -> dict[str, Any]:
@@ -2262,12 +3072,14 @@ def system_status() -> dict[str, Any]:
             "configured": bool(SLACK_BOT_TOKEN and SLACK_CHANNEL_IDS),
             "channel_count": len(SLACK_CHANNEL_IDS),
             "last_sync_at": last_sync[0] if last_sync else None,
+            "sync": slack_sync_status(),
         },
         "context": {
             "enabled": bool(LLM_CONTEXT_ENABLED and LLM_API_KEY and LLM_MODEL),
             "external_sources": "mock",
         },
         "memory": {key: memory[key] for key in ("provider", "enabled", "configured", "active")},
+        "rag": rag_status(),
         "workflow": {key: workflow[key] for key in ("engine", "checkpointer", "postgres_configured")},
         "demo": bool(has_demo),
     }
@@ -2323,6 +3135,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Message not found"}, HTTPStatus.NOT_FOUND)
         elif path == "/api/decision-memory/status":
             self.send_json(mem0_status())
+        elif path == "/api/rag/status":
+            self.send_json(rag_status())
         elif path == "/api/decision-memory/search":
             query = parse_qs(parsed_url.query).get("q", [""])[0]
             if not query.strip():
@@ -2370,8 +3184,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(create_message(text), HTTPStatus.CREATED)
             elif path == "/api/decision-memory/sync":
                 self.send_json(sync_saved_decision_memories())
+            elif path == "/api/rag/reindex":
+                self.send_json(start_rag_reindex())
             elif path == "/api/slack/sync":
-                self.send_json({"ok": True, "ingested": sync_slack_history()})
+                self.send_json(start_slack_sync())
             elif path.startswith("/api/messages/") and path.endswith("/context"):
                 message_id = path.split("/")[3]
                 self.send_json(refresh_message_context(message_id))
