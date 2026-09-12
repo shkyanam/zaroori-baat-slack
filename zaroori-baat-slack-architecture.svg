@@ -1,54 +1,272 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1030" viewBox="0 0 1600 1030">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1320" viewBox="0 0 1600 1320" role="img" aria-labelledby="diagram-title diagram-description">
+  <title id="diagram-title">Zaroori Baat Slack architecture</title>
+  <desc id="diagram-description">Slack events, bounded history, and mock messages enter a Python HTTP service, run through a durable LangGraph workflow with parallel action and decision memory extraction, and are persisted for human review, optional AI and memory integrations, and observability.</desc>
   <defs>
-    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#173f53"/><stop offset="1" stop-color="#176b62"/></linearGradient>
-    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f1f7f3"/></linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#183c3b" flood-opacity=".14"/></filter>
-    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#3d7180"/></marker>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#173f53"/>
+      <stop offset="1" stop-color="#176b62"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f1f7f3"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#183c3b" flood-opacity=".14"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#3d7180"/>
+    </marker>
+    <marker id="arrow-dashed" markerWidth="12" markerHeight="12" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#8aa9a3"/>
+    </marker>
     <style>
-      .title{font:700 48px Georgia,serif;fill:#173f53}.subtitle{font:400 22px Arial,sans-serif;fill:#55716f}.section{font:700 23px Arial,sans-serif;fill:#fff}.paneltitle{font:700 21px Arial,sans-serif;fill:#173f53}.body{font:400 17px Arial,sans-serif;fill:#284744}.small{font:400 15px Arial,sans-serif;fill:#55716f}.bold{font:700 17px Arial,sans-serif;fill:#173f53}.center{font:700 19px Arial,sans-serif;fill:#173f53;text-anchor:middle}.number{font:700 16px Arial,sans-serif;fill:#fff}.box{stroke:#b7d2c8;stroke-width:2;fill:url(#paper)}.source{stroke:#83b5c0;stroke-width:2;fill:#eff8fa}.agent{stroke:#9b8cce;stroke-width:2;fill:#f6f3ff}.store{stroke:#8bb99a;stroke-width:2;fill:#eff9f1}.human{stroke:#e59563;stroke-width:2;fill:#fff5ed}.line{stroke:#3d7180;stroke-width:3;fill:none;marker-end:url(#arrow)}.dashed{stroke:#8aa9a3;stroke-width:2;fill:none;stroke-dasharray:7 6}
+      .title{font:700 42px Georgia,serif;fill:#173f53}
+      .subtitle{font:400 20px Arial,sans-serif;fill:#55716f}
+      .section{font:700 20px Arial,sans-serif;fill:#fff}
+      .header-meta{font:400 12px Arial,sans-serif;fill:#d8efea}
+      .paneltitle{font:700 18px Arial,sans-serif;fill:#173f53}
+      .node-title{font:700 15px Arial,sans-serif;fill:#173f53}
+      .body{font:400 14px Arial,sans-serif;fill:#284744}
+      .small{font:400 12px Arial,sans-serif;fill:#55716f}
+      .tiny{font:400 11px Arial,sans-serif;fill:#55716f}
+      .bold{font:700 14px Arial,sans-serif;fill:#173f53}
+      .center{font:700 16px Arial,sans-serif;fill:#173f53;text-anchor:middle}
+      .center-small{font:400 12px Arial,sans-serif;fill:#55716f;text-anchor:middle}
+      .number{font:700 14px Arial,sans-serif;fill:#fff}
+      .box{stroke:#b7d2c8;stroke-width:2;fill:url(#paper)}
+      .source{stroke:#83b5c0;stroke-width:2;fill:#eff8fa}
+      .agent{stroke:#9b8cce;stroke-width:2;fill:#f6f3ff}
+      .store{stroke:#8bb99a;stroke-width:2;fill:#eff9f1}
+      .human{stroke:#e59563;stroke-width:2;fill:#fff5ed}
+      .integration{stroke:#d3a65f;stroke-width:2;fill:#fff9e8}
+      .service{stroke:#5b9f9a;stroke-width:2;fill:#eef9f7}
+      .line{stroke:#3d7180;stroke-width:2.5;fill:none;marker-end:url(#arrow)}
+      .dashed{stroke:#8aa9a3;stroke-width:2;fill:none;stroke-dasharray:7 6;marker-end:url(#arrow-dashed)}
+      .boundary{fill:#fff;stroke:#274c59;stroke-width:3}
+      .lane{fill:#f9fcfb;stroke:#c2d8ce;stroke-width:1.5}
     </style>
   </defs>
-  <rect width="1600" height="1030" fill="#fff"/>
-  <text x="800" y="58" class="title" text-anchor="middle">Zaroori Baat Slack</text>
-  <text x="800" y="91" class="subtitle" text-anchor="middle">Slack Signal Desk: from message volume to clear action</text>
 
-  <rect x="28" y="125" width="270" height="205" rx="12" class="box" filter="url(#shadow)"/>
-  <text x="55" y="165" class="paneltitle">What It Does</text>
-  <text x="55" y="207" class="body">● Scans Slack messages</text><text x="55" y="243" class="body">● Scores actionability</text><text x="55" y="279" class="body">● Ranks urgent signals</text><text x="55" y="315" class="body">● Keeps humans in control</text>
+  <rect width="1600" height="1320" fill="#fff"/>
+  <text x="800" y="50" class="title" text-anchor="middle">Zaroori Baat Slack</text>
+  <text x="800" y="82" class="subtitle" text-anchor="middle">Slack event → durable LangGraph workflow → human decision → observable memory</text>
 
-  <rect x="28" y="350" width="270" height="205" rx="12" class="box" filter="url(#shadow)"/>
-  <text x="55" y="390" class="paneltitle">Priority Model</text>
-  <text x="55" y="432" class="body">▲ High: blocker or deadline</text><text x="55" y="468" class="body">● Medium: action requested</text><text x="55" y="504" class="body">○ Low: informational noise</text><text x="55" y="540" class="body">? Needs human context</text>
+  <!-- Left: inbound systems and guardrails -->
+  <rect x="28" y="125" width="245" height="430" rx="12" class="box" filter="url(#shadow)"/>
+  <text x="53" y="162" class="paneltitle">Inbound sources</text>
+  <rect x="50" y="185" width="201" height="92" rx="10" class="source"/>
+  <text x="150" y="216" class="center">Slack workspace</text>
+  <text x="150" y="241" class="center-small">Events API · new messages</text>
+  <text x="150" y="260" class="center-small">Configured target channels</text>
+  <rect x="50" y="295" width="201" height="92" rx="10" class="source"/>
+  <text x="150" y="326" class="center">Slack Web API</text>
+  <text x="150" y="351" class="center-small">Bounded history scan</text>
+  <text x="150" y="370" class="center-small">conversations.history</text>
+  <rect x="50" y="405" width="201" height="92" rx="10" class="source"/>
+  <text x="150" y="436" class="center">Mock / local input</text>
+  <text x="150" y="461" class="center-small">POST /api/messages</text>
+  <text x="150" y="480" class="center-small">Demo without Slack credentials</text>
 
-  <rect x="28" y="575" width="270" height="205" rx="12" class="box" filter="url(#shadow)"/>
-  <text x="55" y="615" class="paneltitle">Human Controls</text>
-  <text x="55" y="657" class="body">● Take action</text><text x="55" y="693" class="body">● Defer for later</text><text x="55" y="729" class="body">● Dismiss as noise</text><text x="55" y="765" class="body">● Escalate to an owner</text>
+  <rect x="28" y="580" width="245" height="300" rx="12" class="box" filter="url(#shadow)"/>
+  <text x="53" y="617" class="paneltitle">Trust boundary</text>
+  <text x="53" y="659" class="body">• HMAC signature validation</text>
+  <text x="53" y="693" class="body">• URL verification</text>
+  <text x="53" y="727" class="body">• Event and subtype filtering</text>
+  <text x="53" y="761" class="body">• External-ID deduplication</text>
+  <text x="53" y="795" class="body">• Secrets loaded from .env</text>
+  <text x="53" y="841" class="small">No Slack UI scraping or</text>
+  <text x="53" y="861" class="small">unsupervised outbound replies.</text>
 
-  <rect x="320" y="125" width="900" height="655" rx="15" fill="#fff" stroke="#274c59" stroke-width="3" filter="url(#shadow)"/>
-  <path d="M320 125 H820 Q840 125 840 145 V165 H320 Z" fill="url(#navy)"/>
-  <text x="350" y="153" class="section">Slack Agentic Architecture</text>
+  <!-- Main service boundary -->
+  <rect x="295" y="125" width="1015" height="1015" rx="15" class="boundary" filter="url(#shadow)"/>
+  <path d="M295 125 H1310 V177 H295 Z" fill="url(#navy)"/>
+  <text x="325" y="158" class="section">Python HTTP service</text>
+  <text x="1265" y="158" class="header-meta" text-anchor="end">ThreadingHTTPServer · serves UI + JSON API</text>
 
-  <rect x="350" y="205" width="205" height="150" rx="12" class="source"/><text x="452" y="245" class="center">Slack Workspace</text><text x="452" y="280" class="small" text-anchor="middle">#all-capacity</text><text x="452" y="306" class="small" text-anchor="middle">Public / private channels</text><text x="452" y="332" class="small" text-anchor="middle">Direct mentions</text>
-  <rect x="600" y="205" width="205" height="150" rx="12" class="source"/><text x="702" y="245" class="center">Ingestion Paths</text><text x="702" y="280" class="small" text-anchor="middle">Events API</text><text x="702" y="306" class="small" text-anchor="middle">Sync Slack history</text><text x="702" y="332" class="small" text-anchor="middle">Mock test input</text>
-  <path d="M555 280 H600" class="line"/>
+  <!-- API and ingestion layer -->
+  <text x="325" y="209" class="paneltitle">1 · Receive, validate, and normalize</text>
+  <rect x="325" y="230" width="296" height="105" rx="10" class="service"/>
+  <text x="473" y="261" class="center">Slack webhook</text>
+  <text x="473" y="286" class="center-small">POST /webhooks/slack</text>
+  <text x="473" y="305" class="center-small">verify → filter → acknowledge</text>
+  <text x="473" y="324" class="center-small">event_callback / app_mention</text>
+  <rect x="647" y="230" width="296" height="105" rx="10" class="service"/>
+  <text x="795" y="261" class="center">History sync endpoint</text>
+  <text x="795" y="286" class="center-small">POST /api/slack/sync</text>
+  <text x="795" y="305" class="center-small">Slack channel IDs → 50 messages</text>
+  <text x="795" y="324" class="center-small">create_message per record</text>
+  <rect x="969" y="230" width="296" height="105" rx="10" class="service"/>
+  <text x="1117" y="261" class="center">Demo API</text>
+  <text x="1117" y="286" class="center-small">POST /api/messages</text>
+  <text x="1117" y="305" class="center-small">mock message fallback</text>
+  <text x="1117" y="324" class="center-small">same workflow as Slack input</text>
+  <path d="M251 231 H325" class="line"/>
+  <path d="M251 341 H647" class="line"/>
+  <path d="M251 451 H969" class="line"/>
 
-  <rect x="850" y="190" width="330" height="75" rx="10" class="agent"/><circle cx="880" cy="228" r="17" fill="#7563bd"/><text x="880" y="234" class="number" text-anchor="middle">1</text><text x="910" y="223" class="bold">Validate and Normalize</text><text x="910" y="247" class="small">Verify signature, deduplicate, standardize</text>
-  <rect x="850" y="280" width="330" height="75" rx="10" class="agent"/><circle cx="880" cy="318" r="17" fill="#7563bd"/><text x="880" y="324" class="number" text-anchor="middle">2</text><text x="910" y="313" class="bold">Priority Scoring</text><text x="910" y="337" class="small">Urgency, action terms, mentions, deadline</text>
-  <rect x="850" y="370" width="330" height="75" rx="10" class="agent"/><circle cx="880" cy="408" r="17" fill="#7563bd"/><text x="880" y="414" class="number" text-anchor="middle">3</text><text x="910" y="403" class="bold">Signal Summarizer</text><text x="910" y="427" class="small">Summary, reason, suggested next action</text>
-  <path d="M805 250 H830 V228 H850" class="line"/><path d="M830 318 H850" class="line"/><path d="M830 408 H850" class="line"/>
+  <rect x="425" y="365" width="755" height="64" rx="10" class="agent"/>
+  <circle cx="456" cy="397" r="16" fill="#7563bd"/>
+  <text x="456" y="402" class="number" text-anchor="middle">A</text>
+  <text x="485" y="392" class="bold">Normalize + idempotent ingest</text>
+  <text x="485" y="413" class="small">message_id · external_id · channel · thread_ts · sender · text · created_at</text>
+  <path d="M473 335 V350 H600 V365" class="line"/>
+  <path d="M795 335 V365" class="line"/>
+  <path d="M1117 335 V350 H1000 V365" class="line"/>
 
-  <rect x="350" y="420" width="220" height="115" rx="12" class="store"/><text x="460" y="458" class="center">Message Store</text><text x="460" y="488" class="small" text-anchor="middle">SQLite persistence</text><text x="460" y="512" class="small" text-anchor="middle">Message IDs and decisions</text>
-  <rect x="620" y="420" width="220" height="115" rx="12" class="human"/><text x="730" y="458" class="center">Ranked Action Queue</text><text x="730" y="488" class="small" text-anchor="middle">High → medium → low</text><text x="730" y="512" class="small" text-anchor="middle">Score and rationale</text>
-  <path d="M460 355 V420" class="line"/><path d="M730 355 V420" class="line"/><path d="M570 477 H620" class="line"/>
+  <!-- LangGraph workflow -->
+  <rect x="325" y="460" width="955" height="372" rx="13" class="lane"/>
+  <path d="M325 460 H1280 V500 H325 Z" fill="#eef6f3"/>
+  <text x="350" y="486" class="paneltitle">2 · LangGraph StateGraph</text>
+  <text x="1250" y="486" class="small" text-anchor="end">durable thread_id per workflow run</text>
+  <path d="M802 429 V460" class="line"/>
 
-  <rect x="850" y="475" width="330" height="75" rx="10" class="agent"/><circle cx="880" cy="513" r="17" fill="#7563bd"/><text x="880" y="519" class="number" text-anchor="middle">4</text><text x="910" y="508" class="bold">Review Context</text><text x="910" y="532" class="small">Channel, sender, time, duplicate signal</text><path d="M840 477 H850" class="line"/>
+  <rect x="350" y="530" width="194" height="82" rx="10" class="agent"/>
+  <circle cx="376" cy="558" r="15" fill="#7563bd"/>
+  <text x="376" y="563" class="number" text-anchor="middle">1</text>
+  <text x="447" y="557" class="node-title" text-anchor="middle">Classify + prioritize</text>
+  <text x="447" y="580" class="small" text-anchor="middle">category · score · priority</text>
+  <text x="447" y="598" class="tiny" text-anchor="middle">FYI → Decision Needed</text>
 
-  <rect x="350" y="590" width="490" height="125" rx="12" class="human"/><text x="595" y="620" class="bold" text-anchor="middle" fill="#a44b27">EXPLICIT HUMAN DECISION</text><rect x="375" y="645" width="125" height="45" rx="7" fill="#fff" stroke="#e59563"/><text x="437" y="673" class="small" text-anchor="middle">Take action</text><rect x="530" y="645" width="125" height="45" rx="7" fill="#fff" stroke="#e59563"/><text x="592" y="673" class="small" text-anchor="middle">Defer</text><rect x="685" y="645" width="125" height="45" rx="7" fill="#fff" stroke="#e59563"/><text x="747" y="673" class="small" text-anchor="middle">Dismiss / Escalate</text><path d="M730 535 V590" class="line"/>
-  <rect x="850" y="590" width="330" height="125" rx="12" class="store"/><text x="1015" y="625" class="center">Decision and Eval Log</text><text x="1015" y="657" class="small" text-anchor="middle">Reviewer outcome</text><text x="1015" y="683" class="small" text-anchor="middle">Traceable score and timestamp</text><text x="1015" y="709" class="small" text-anchor="middle">Eval dataset for tuning</text><path d="M840 650 H850" class="line"/>
+  <rect x="570" y="530" width="205" height="82" rx="10" class="agent"/>
+  <circle cx="596" cy="558" r="15" fill="#7563bd"/>
+  <text x="596" y="563" class="number" text-anchor="middle">2</text>
+  <text x="672" y="557" class="node-title" text-anchor="middle">Find related messages</text>
+  <text x="672" y="580" class="small" text-anchor="middle">SQLite history retrieval</text>
+  <text x="672" y="598" class="tiny" text-anchor="middle">thread · topic · references</text>
 
-  <rect x="1245" y="125" width="327" height="205" rx="12" class="box" filter="url(#shadow)"/><text x="1272" y="165" class="paneltitle">How It Works</text><text x="1275" y="205" class="body">1  Receive or sync Slack</text><text x="1275" y="237" class="body">2  Verify and normalize</text><text x="1275" y="269" class="body">3  Score actionability</text><text x="1275" y="301" class="body">4  Rank and review</text>
-  <rect x="1245" y="350" width="327" height="205" rx="12" class="box" filter="url(#shadow)"/><text x="1272" y="390" class="paneltitle">Data and Trust</text><text x="1275" y="430" class="body">▣ Slack signature validation</text><text x="1275" y="466" class="body">▣ Event deduplication</text><text x="1275" y="502" class="body">▣ Human decision required</text><text x="1275" y="538" class="body">▣ Secrets outside source</text>
-  <rect x="1245" y="575" width="327" height="205" rx="12" class="box" filter="url(#shadow)"/><text x="1272" y="615" class="paneltitle">Integrations</text><text x="1275" y="655" class="body">◆ Slack Events API</text><text x="1275" y="691" class="body">◆ Slack Web API history</text><text x="1275" y="727" class="body">◆ Local SQLite store</text><text x="1275" y="763" class="body">◆ Browser review dashboard</text>
+  <rect x="800" y="530" width="220" height="82" rx="10" class="agent"/>
+  <circle cx="826" cy="558" r="15" fill="#7563bd"/>
+  <text x="826" y="563" class="number" text-anchor="middle">3</text>
+  <text x="910" y="557" class="node-title" text-anchor="middle">Context enrichment</text>
+  <text x="910" y="580" class="small" text-anchor="middle">mock systems + related Slack</text>
+  <text x="910" y="598" class="tiny" text-anchor="middle">optional Nebius synthesis</text>
 
-  <rect x="28" y="820" width="1544" height="150" rx="14" fill="#fff" stroke="#b7c8be" stroke-width="2"/><text x="800" y="855" class="paneltitle" text-anchor="middle">Tech Stack</text><g class="small" text-anchor="middle"><rect x="55" y="875" width="180" height="65" rx="9" class="box"/><text x="145" y="914">Python</text><rect x="255" y="875" width="180" height="65" rx="9" class="box"/><text x="345" y="914">Slack Events API</text><rect x="455" y="875" width="180" height="65" rx="9" class="box"/><text x="545" y="914">Slack Web API</text><rect x="655" y="875" width="180" height="65" rx="9" class="box"/><text x="745" y="914">SQLite</text><rect x="855" y="875" width="180" height="65" rx="9" class="box"/><text x="945" y="914">Priority engine</text><rect x="1055" y="875" width="180" height="65" rx="9" class="box"/><text x="1145" y="914">Human review UI</text><rect x="1255" y="875" width="180" height="65" rx="9" class="box"/><text x="1345" y="914">LocalTunnel</text><rect x="1455" y="875" width="100" height="65" rx="9" class="box"/><text x="1505" y="914">Evals</text></g>
+  <rect x="545" y="690" width="220" height="82" rx="10" class="agent"/>
+  <circle cx="571" cy="718" r="15" fill="#7563bd"/>
+  <text x="571" y="723" class="number" text-anchor="middle">4</text>
+  <text x="655" y="717" class="node-title" text-anchor="middle">Action extraction</text>
+  <text x="655" y="740" class="small" text-anchor="middle">tasks · follow-ups · risks</text>
+  <text x="655" y="758" class="tiny" text-anchor="middle">owner / due / source IDs</text>
+
+  <rect x="790" y="690" width="220" height="82" rx="10" class="agent"/>
+  <circle cx="816" cy="718" r="15" fill="#7563bd"/>
+  <text x="816" y="723" class="number" text-anchor="middle">5</text>
+  <text x="900" y="717" class="node-title" text-anchor="middle">Decision memory</text>
+  <text x="900" y="740" class="small" text-anchor="middle">chosen option · alternatives</text>
+  <text x="900" y="758" class="tiny" text-anchor="middle">participants · rationale · confidence</text>
+
+  <rect x="1035" y="690" width="220" height="82" rx="10" class="store"/>
+  <circle cx="1061" cy="718" r="15" fill="#4c9b6d"/>
+  <text x="1061" y="723" class="number" text-anchor="middle">6</text>
+  <text x="1145" y="717" class="node-title" text-anchor="middle">Persist output</text>
+  <text x="1145" y="740" class="small" text-anchor="middle">messages + JSON fields</text>
+  <text x="1145" y="758" class="tiny" text-anchor="middle">preserve stored memory marker</text>
+
+  <path d="M544 571 H570" class="line"/>
+  <path d="M775 571 H800" class="line"/>
+  <path d="M910 612 V655 H655 V690" class="line"/>
+  <path d="M910 612 V655 H900 V690" class="line"/>
+  <path d="M775 612 V650 H655 V690" class="dashed"/>
+  <path d="M775 612 V650 H900 V690" class="dashed"/>
+  <path d="M765 731 H1035" class="line"/>
+  <path d="M1010 731 H1035" class="line"/>
+
+  <!-- Storage and observability -->
+  <text x="325" y="872" class="paneltitle">3 · State, memory, and observability</text>
+  <rect x="325" y="892" width="300" height="156" rx="11" class="store"/>
+  <text x="475" y="926" class="center">Message store</text>
+  <text x="475" y="951" class="center-small">zaroori_baat_slack.sqlite3</text>
+  <text x="350" y="980" class="small">messages: context_json · actions_json</text>
+  <text x="350" y="999" class="small">decision_memory_json · reviewer decision</text>
+  <text x="350" y="1018" class="small">decision + decided_at preserved on retries</text>
+
+  <rect x="655" y="892" width="300" height="156" rx="11" class="store"/>
+  <text x="805" y="926" class="center">LangGraph checkpointer</text>
+  <text x="805" y="951" class="center-small">SQLite locally · PostgreSQL in production</text>
+  <text x="680" y="980" class="small">checkpoint path is configurable</text>
+  <text x="680" y="999" class="small">LANGGRAPH_CHECKPOINTER=sqlite|postgres</text>
+  <text x="680" y="1018" class="small">safe status at /api/workflow/status</text>
+
+  <rect x="985" y="892" width="295" height="156" rx="11" class="store"/>
+  <text x="1132" y="926" class="center">Workflow runs</text>
+  <text x="1132" y="951" class="center-small">local observability metrics</text>
+  <text x="1010" y="980" class="small">running / completed / failed</text>
+  <text x="1010" y="999" class="small">duration · agents · classifications</text>
+  <text x="1010" y="1018" class="small">GET /api/observability/summary</text>
+  <path d="M1145 772 V850 H475 V892" class="line"/>
+  <path d="M1145 772 V850 H805 V892" class="dashed"/>
+  <path d="M1160 772 V850 H1132 V892" class="dashed"/>
+
+  <!-- Right: consumer and optional integrations -->
+  <rect x="1327" y="125" width="245" height="405" rx="12" class="box" filter="url(#shadow)"/>
+  <text x="1352" y="162" class="paneltitle">Human review</text>
+  <rect x="1349" y="185" width="201" height="112" rx="10" class="human"/>
+  <text x="1449" y="216" class="center">Browser dashboard</text>
+  <text x="1449" y="241" class="center-small">index.html + app.js</text>
+  <text x="1449" y="260" class="center-small">ranked queue + tabs</text>
+  <text x="1449" y="279" class="center-small">context / actions / memory</text>
+  <rect x="1349" y="315" width="201" height="88" rx="10" class="human"/>
+  <text x="1449" y="344" class="center">Explicit decision</text>
+  <text x="1449" y="367" class="center-small">approved · deferred</text>
+  <text x="1449" y="386" class="center-small">dismissed · escalated</text>
+  <rect x="1349" y="421" width="201" height="82" rx="10" class="human"/>
+  <text x="1449" y="450" class="center">No auto-send</text>
+  <text x="1449" y="473" class="center-small">decision is stored locally</text>
+  <text x="1449" y="492" class="center-small">before any future response adapter</text>
+  <path d="M1310 280 H1349" class="dashed"/>
+  <path d="M1310 650 H1325 V359 H1349" class="dashed"/>
+
+  <rect x="1327" y="555" width="245" height="585" rx="12" class="box" filter="url(#shadow)"/>
+  <text x="1352" y="592" class="paneltitle">Optional integrations</text>
+  <rect x="1349" y="615" width="201" height="130" rx="10" class="integration"/>
+  <text x="1449" y="646" class="center">Nebius Token Factory</text>
+  <text x="1449" y="671" class="center-small">Context LLM</text>
+  <text x="1449" y="690" class="center-small">Action extraction LLM</text>
+  <text x="1449" y="709" class="center-small">Decision memory LLM</text>
+  <text x="1449" y="728" class="center-small">deterministic fallback if off</text>
+  <rect x="1349" y="765" width="201" height="130" rx="10" class="integration"/>
+  <text x="1449" y="796" class="center">Mem0 Platform</text>
+  <text x="1449" y="821" class="center-small">semantic decision add/search</text>
+  <text x="1449" y="840" class="center-small">optional hosted memory</text>
+  <text x="1449" y="859" class="center-small">SQLite fallback when disabled</text>
+  <text x="1449" y="878" class="center-small">Sync saved decisions</text>
+  <rect x="1349" y="915" width="201" height="188" rx="10" class="integration"/>
+  <text x="1449" y="946" class="center">LangSmith</text>
+  <text x="1449" y="971" class="center-small">optional tracing</text>
+  <text x="1449" y="990" class="center-small">graph + workflow nodes</text>
+  <text x="1449" y="1009" class="center-small">Nebius + Mem0 HTTP calls</text>
+  <text x="1449" y="1037" class="center-small">content capture off by default</text>
+  <text x="1449" y="1061" class="center-small">/api/observability/status</text>
+  <text x="1449" y="1080" class="center-small">Open LangSmith</text>
+  <path d="M1020 571 H1288 V680 H1349" class="dashed"/>
+  <path d="M1255 731 H1288 V830 H1349" class="dashed"/>
+  <path d="M1280 970 H1310 V1009 H1349" class="dashed"/>
+
+  <!-- Legend -->
+  <rect x="28" y="910" width="245" height="230" rx="12" class="box" filter="url(#shadow)"/>
+  <text x="53" y="947" class="paneltitle">Diagram key</text>
+  <rect x="53" y="972" width="26" height="18" rx="4" class="agent"/>
+  <text x="91" y="986" class="small">Workflow / agent node</text>
+  <rect x="53" y="1008" width="26" height="18" rx="4" class="store"/>
+  <text x="91" y="1022" class="small">Persistent state</text>
+  <rect x="53" y="1044" width="26" height="18" rx="4" class="human"/>
+  <text x="91" y="1058" class="small">Human-controlled surface</text>
+  <rect x="53" y="1080" width="26" height="18" rx="4" class="integration"/>
+  <text x="91" y="1094" class="small">Optional integration</text>
+  <path d="M53 1118 H80" class="line"/>
+  <text x="91" y="1122" class="small">Runtime data flow</text>
+
+  <!-- Technology footer -->
+  <rect x="28" y="1170" width="1544" height="120" rx="14" fill="#fff" stroke="#b7c8be" stroke-width="2"/>
+  <text x="800" y="1202" class="paneltitle" text-anchor="middle">Technology and deployment choices</text>
+  <g class="small" text-anchor="middle">
+    <rect x="55" y="1220" width="155" height="45" rx="8" class="box"/><text x="132" y="1247">Python</text>
+    <rect x="225" y="1220" width="190" height="45" rx="8" class="box"/><text x="320" y="1247">Custom HTTP server</text>
+    <rect x="430" y="1220" width="155" height="45" rx="8" class="box"/><text x="507" y="1247">LangGraph</text>
+    <rect x="600" y="1220" width="155" height="45" rx="8" class="box"/><text x="677" y="1247">SQLite</text>
+    <rect x="770" y="1220" width="190" height="45" rx="8" class="box"/><text x="865" y="1247">PostgreSQL option</text>
+    <rect x="975" y="1220" width="155" height="45" rx="8" class="box"/><text x="1052" y="1247">Nebius</text>
+    <rect x="1145" y="1220" width="155" height="45" rx="8" class="box"/><text x="1222" y="1247">Mem0</text>
+    <rect x="1315" y="1220" width="155" height="45" rx="8" class="box"/><text x="1392" y="1247">LangSmith</text>
+  </g>
 </svg>
