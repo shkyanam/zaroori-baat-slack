@@ -1,4 +1,8 @@
-﻿import { useQuery } from '@tanstack/react-query';
+import { channelName } from '../slackIdentity';
+import SlackMark from '../components/SlackMark';
+import SlackSource from '../components/SlackSource';
+import StatusPill, { ClassificationPill } from '../components/StatusPill';
+import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
   ArrowRight,
@@ -6,13 +10,16 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
+  CircleCheck,
+  Clock3,
   Database,
+  FlaskConical,
   Layers3,
   RefreshCw,
   Settings2,
-  Slack,
   Sparkles,
   Waypoints,
+  Wifi,
 } from 'lucide-react';
 import { api } from '../api';
 import styles from './Pages.module.css';
@@ -64,7 +71,7 @@ export default function System({
     <div className={styles.page}>
       <header className={styles.pageIntro}>
         <div>
-          <p className="eyebrow">YOUR WORKSPACE, WORKING FOR YOU</p>
+          <p className="eyebrow">YOUR SLACK WORKSPACE & CONNECTIONS</p>
           <h1>
             System & preferences
             <span className={styles.headingDot} aria-hidden="true">
@@ -90,10 +97,9 @@ export default function System({
         <div className={styles.sectionHeading}>
           <h2>Your connections</h2>
           {status.isSuccess && (
-            <span className={styles.liveLabel}>
-              <span />
+            <StatusPill tone="success" icon={Wifi}>
               Local API responding
-            </span>
+            </StatusPill>
           )}
         </div>
         {status.isError && (
@@ -127,19 +133,16 @@ export default function System({
               <article className={styles.integrationCard}>
                 <div className={styles.integrationTop}>
                   <span className={styles.connectionIcon}>
-                    <Slack size={27} aria-hidden="true" />
+                    <SlackMark size={27} />
                   </span>
-                  <span
-                    className={`${styles.statusDot} ${status.data.slack.configured ? styles.dotGood : ''}`}
-                    aria-hidden="true"
-                  />
                 </div>
                 <h3>Slack</h3>
-                <span
-                  className={`${styles.statusPill} ${status.data.slack.configured ? styles.statusGood : styles.statusNeutral}`}
+                <StatusPill
+                  tone={status.data.slack.configured ? 'success' : 'neutral'}
+                  icon={status.data.slack.configured ? CircleCheck : CircleAlert}
                 >
                   {status.data.slack.configured ? 'Configured' : 'Not configured'}
-                </span>
+                </StatusPill>
                 <details className={styles.integrationDetails}>
                   <summary>
                     Connection details <ChevronDown size={14} aria-hidden="true" />
@@ -162,17 +165,25 @@ export default function System({
                   <span className={`${styles.connectionIcon} ${styles.lavender}`}>
                     <Sparkles size={27} aria-hidden="true" />
                   </span>
-                  <span className={`${styles.statusDot} ${styles.dotAmber}`} aria-hidden="true" />
                 </div>
                 <h3>Context enrichment</h3>
-                <span className={`${styles.statusPill} ${styles.statusAmber}`}>Mock sources</span>
+                <StatusPill tone="warning" icon={FlaskConical}>
+                  Mock sources
+                </StatusPill>
                 <details className={styles.integrationDetails}>
                   <summary>
                     Connection details <ChevronDown size={14} aria-hidden="true" />
                   </summary>
                   <p>External work items, builds, incidents, and PR evidence use mock sources.</p>
                   <span className="field-label">Synthesis</span>
-                  <p>{status.data.context.enabled ? 'AI enabled' : 'Fallback analysis'}</p>
+                  <div className={styles.integrationMetadata}>
+                    <StatusPill
+                      tone={status.data.context.enabled ? 'memory' : 'neutral'}
+                      icon={Sparkles}
+                    >
+                      {status.data.context.enabled ? 'AI enabled' : 'Fallback analysis'}
+                    </StatusPill>
+                  </div>
                 </details>
               </article>
               <article className={styles.integrationCard}>
@@ -180,14 +191,14 @@ export default function System({
                   <span className={styles.connectionIcon}>
                     <Database size={27} aria-hidden="true" />
                   </span>
-                  <span className={`${styles.statusDot} ${styles.dotGood}`} aria-hidden="true" />
                 </div>
                 <h3>Decision memory</h3>
-                <span
-                  className={`${styles.statusPill} ${memoryConfigured ? styles.statusGood : styles.statusNeutral}`}
+                <StatusPill
+                  tone={memoryConfigured ? 'success' : 'neutral'}
+                  icon={memoryConfigured ? CircleCheck : Database}
                 >
                   {memoryConfigured ? 'Configured' : 'Local only'}
-                </span>
+                </StatusPill>
                 <details className={styles.integrationDetails}>
                   <summary>
                     Connection details <ChevronDown size={14} aria-hidden="true" />
@@ -204,12 +215,11 @@ export default function System({
                   <span className={`${styles.connectionIcon} ${styles.peach}`}>
                     <Waypoints size={27} aria-hidden="true" />
                   </span>
-                  <span className={styles.statusDot} aria-hidden="true" />
                 </div>
                 <h3>Agent workflow</h3>
-                <span className={`${styles.statusPill} ${styles.statusNeutral}`}>
+                <StatusPill tone="info" icon={Waypoints}>
                   {status.data.workflow.engine || 'Workflow'}
-                </span>
+                </StatusPill>
                 <details className={styles.integrationDetails}>
                   <summary>
                     Connection details <ChevronDown size={14} aria-hidden="true" />
@@ -269,10 +279,7 @@ export default function System({
       <section aria-label="Workflow metrics">
         <div className={styles.sectionHeading}>
           <h2>Behind the scenes</h2>
-          <span className={styles.quietLabel}>
-            <Activity size={15} aria-hidden="true" />
-            Recorded workflow activity
-          </span>
+          <StatusPill icon={Activity}>Recorded workflow activity</StatusPill>
         </div>
         {observability.isError && (
           <div className={styles.error} role="alert">
@@ -360,9 +367,9 @@ export default function System({
                 {classificationEntries.length ? (
                   <div className={styles.barList}>
                     {classificationEntries.map(([label, count]) => (
-                      <div className={styles.barRow} key={label}>
+                      <div className={styles.barRow} key={label} data-signal={label}>
                         <div>
-                          <span>{label}</span>
+                          <ClassificationPill classification={label} />
                           <strong>{count}</strong>
                         </div>
                         <div className={styles.barTrack}>
@@ -389,15 +396,16 @@ export default function System({
                   <h3>LangSmith tracing</h3>
                   <Waypoints size={18} aria-hidden="true" />
                 </div>
-                <span
-                  className={`${styles.statusPill} ${observability.data?.langsmith?.active ? styles.statusGood : styles.statusNeutral}`}
+                <StatusPill
+                  tone={observability.data?.langsmith?.active ? 'success' : 'neutral'}
+                  icon={observability.data?.langsmith?.active ? CircleCheck : Waypoints}
                 >
                   {observability.data
                     ? observability.data.langsmith?.active
                       ? 'Configured'
                       : 'Not configured'
                     : 'Status unavailable'}
-                </span>
+                </StatusPill>
                 <p className={styles.traceCopy}>
                   Follow each processing step to investigate an unexpected result.
                 </p>
@@ -422,7 +430,9 @@ export default function System({
             <div className={styles.runPanel}>
               <div className={styles.sectionHeading}>
                 <h3>Recent runs</h3>
-                <span className="muted">Latest {observability.data?.recent_runs.length ?? 0}</span>
+                <StatusPill icon={Activity}>
+                  Latest {observability.data?.recent_runs.length ?? 0}
+                </StatusPill>
               </div>
               {observability.data?.recent_runs.length ? (
                 <div className={styles.tableScroll}>
@@ -451,19 +461,40 @@ export default function System({
                             )}
                           </td>
                           <td>
-                            <span>
-                              {run.channel
-                                ? `#${run.channel.replace(/^#/, '')}`
-                                : 'Channel unavailable'}
-                            </span>
-                            <small>{run.classification || 'Classification unavailable'}</small>
+                            {channelName(run) ? (
+                              <SlackSource channel={channelName(run)} />
+                            ) : (
+                              <span>Channel unavailable</span>
+                            )}
+                            <div className={styles.runSignal}>
+                              {run.classification ? (
+                                <ClassificationPill classification={run.classification} />
+                              ) : (
+                                <StatusPill>Classification unavailable</StatusPill>
+                              )}
+                            </div>
                           </td>
                           <td>
-                            <span
-                              className={`${styles.statusPill} ${run.status === 'completed' || run.status === 'complete' ? styles.statusGood : run.status === 'failed' ? styles.statusBad : styles.statusNeutral}`}
+                            <StatusPill
+                              tone={
+                                run.status === 'completed' || run.status === 'complete'
+                                  ? 'success'
+                                  : run.status === 'failed'
+                                    ? 'danger'
+                                    : run.status === 'running'
+                                      ? 'info'
+                                      : 'neutral'
+                              }
+                              icon={
+                                run.status === 'completed' || run.status === 'complete'
+                                  ? CircleCheck
+                                  : run.status === 'failed'
+                                    ? CircleAlert
+                                    : Clock3
+                              }
                             >
                               {run.status}
-                            </span>
+                            </StatusPill>
                           </td>
                           <td>{duration(run.duration_ms)}</td>
                           <td>{dateTime(run.started_at)}</td>

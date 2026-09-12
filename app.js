@@ -26,12 +26,22 @@ classificationTabs.setAttribute('role', 'tablist');
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#039;', '"':'&quot;' })[c]); }
 function notify(message) { toast.textContent = message; toast.classList.add('visible'); setTimeout(() => toast.classList.remove('visible'), 2200); }
 function countId(classification) { return `#count-${classification.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`; }
+function senderName(source) { return source.sender_name?.trim() || source.sender || ''; }
+function channelName(source) {
+  const known = messages.find((message) => message.channel === source.channel && message.channel_name?.trim());
+  return (source.channel_name?.trim() || known?.channel_name?.trim() || source.channel || '').replace(/^#/, '');
+}
+function sourceLabel(source, message) {
+  const identities = [message, ...(message.context?.related_messages || []), ...messages];
+  const identity = identities.find((item) => item.channel && source === `Slack channel ${item.channel}` && channelName(item) !== item.channel.replace(/^#/, ''));
+  return identity ? `Slack channel #${channelName(identity)}` : source;
+}
 function renderContext(message) {
   const context = message.context || {};
   const sources = Array.isArray(context.sources) ? context.sources : [];
   const sourceRows = sources.map((source) => `<div class="context-source"><span>${escapeHtml(source.name)}</span><p>${escapeHtml(source.detail)}</p></div>`).join('');
   const relatedMessages = Array.isArray(context.related_messages) ? context.related_messages : [];
-  const relatedRows = relatedMessages.map((related) => `<article class="related-message"><div><strong>${escapeHtml(related.sender)} · ${escapeHtml(related.channel)}</strong><span>${escapeHtml(related.relationship || 'Related message')}</span></div><p>${escapeHtml(related.text)}</p></article>`).join('');
+  const relatedRows = relatedMessages.map((related) => `<article class="related-message"><div><strong>${escapeHtml(senderName(related))} · #${escapeHtml(channelName(related))}</strong><span>${escapeHtml(related.relationship || 'Related message')}</span></div><p>${escapeHtml(related.text)}</p></article>`).join('');
   const relatedHtml = relatedMessages.length ? `<details class="related-messages"><summary>Related Slack messages (${relatedMessages.length})</summary><div class="related-list">${relatedRows}</div></details>` : '';
   const facts = Array.isArray(context.key_facts) && context.key_facts.length ? `<div class="context-facts"><span>Key facts</span><ul>${context.key_facts.map((fact) => `<li>${escapeHtml(fact)}</li>`).join('')}</ul></div>` : '';
   const agentLabel = context.agent === 'llm' ? 'LLM synthesis' : 'Deterministic fallback';
@@ -45,7 +55,7 @@ function renderActions(message) {
     const metadata = [
       item.owner ? `<span>Owner: ${escapeHtml(item.owner)}</span>` : '',
       item.due ? `<span>Due: ${escapeHtml(item.due)}</span>` : '',
-      item.source ? `<span>Source: ${escapeHtml(item.source)}</span>` : '',
+      item.source ? `<span>Source: ${escapeHtml(sourceLabel(item.source, message))}</span>` : '',
     ].filter(Boolean).join('');
     return `<article class="extracted-action"><div class="action-item-head"><span class="action-type ${escapeHtml(String(item.type || '').toLowerCase())}">${escapeHtml(item.type || 'Action')}</span><span class="action-confidence">${escapeHtml(item.confidence || 'medium')} confidence</span></div><strong>${escapeHtml(item.title || 'Untitled action')}</strong>${metadata ? `<div class="action-meta">${metadata}</div>` : ''}</article>`;
   }).join('');
@@ -73,7 +83,7 @@ function renderDecisionMemory(message) {
       alternatives,
       participants,
       date ? `<span>Date: ${escapeHtml(date)}</span>` : '',
-      item.source ? `<span>Source: ${escapeHtml(item.source)}</span>` : '',
+      item.source ? `<span>Source: ${escapeHtml(sourceLabel(item.source, message))}</span>` : '',
     ].filter(Boolean).join('');
     return `<article class="memory-item"><div class="memory-item-head"><span class="memory-label">Decision</span><span class="action-confidence">${escapeHtml(item.confidence || 'medium')} confidence</span></div><strong>${escapeHtml(item.decision || 'Decision recorded')}</strong>${rationale}${metadata ? `<div class="memory-meta">${metadata}</div>` : ''}</article>`;
   }).join('');
@@ -87,7 +97,7 @@ function renderMemorySearch(result) {
   const rows = result.matches.map((match) => {
     const metadata = match.metadata || {};
     const details = [
-      metadata.channel ? `<span>Channel: ${escapeHtml(metadata.channel)}</span>` : '',
+      channelName(metadata) ? `<span>Channel: #${escapeHtml(channelName(metadata))}</span>` : '',
       metadata.thread_ts ? `<span>Thread: ${escapeHtml(metadata.thread_ts)}</span>` : '',
       match.created_at ? `<span>Date: ${escapeHtml(formatDecisionDate(match.created_at))}</span>` : '',
       match.score !== null && match.score !== undefined ? `<span>Score: ${escapeHtml(String(match.score))}</span>` : '',
@@ -111,7 +121,7 @@ function renderObservability(summary) {
   observabilityFailedRuns.textContent = metrics.failed_runs || 0;
   observabilityAverageDuration.textContent = `${metrics.average_duration_ms || 0} ms`;
   const runs = Array.isArray(summary.recent_runs) ? summary.recent_runs : [];
-  observabilityRuns.innerHTML = runs.length ? runs.map((run) => `<article class="observability-run"><div><strong>${escapeHtml(run.classification || 'Processing')}</strong><span class="run-status ${escapeHtml(run.status || '')}">${escapeHtml(run.status || 'unknown')}</span></div><p>${escapeHtml(run.channel || 'Slack')} · ${escapeHtml(String(run.duration_ms ?? '—'))} ms</p><small>${escapeHtml(run.run_id || '')}</small>${run.error ? `<em>${escapeHtml(run.error)}</em>` : ''}</article>`).join('') : '<p class="action-empty">No workflow runs recorded yet.</p>';
+  observabilityRuns.innerHTML = runs.length ? runs.map((run) => `<article class="observability-run"><div><strong>${escapeHtml(run.classification || 'Processing')}</strong><span class="run-status ${escapeHtml(run.status || '')}">${escapeHtml(run.status || 'unknown')}</span></div><p>${channelName(run) ? `#${escapeHtml(channelName(run))}` : 'Slack'} · ${escapeHtml(String(run.duration_ms ?? '—'))} ms</p><small>${escapeHtml(run.run_id || '')}</small>${run.error ? `<em>${escapeHtml(run.error)}</em>` : ''}</article>`).join('') : '<p class="action-empty">No workflow runs recorded yet.</p>';
   const classifications = metrics.classifications || {};
   const classificationRows = Object.entries(classifications).map(([name, count]) => `<div class="classification-row"><span>${escapeHtml(name)}</span><strong>${escapeHtml(String(count))}</strong></div>`).join('');
   observabilityClassifications.innerHTML = classificationRows || '<p class="action-empty">No classifications recorded yet.</p>';
@@ -145,7 +155,7 @@ function render(nextMessages) {
   updateTabs();
   queue.innerHTML = visibleMessages.length ? visibleMessages.map((message) => {
     const actions = message.decision ? `<span class="decision">${escapeHtml(message.decision)}</span>` : `<div class="actions"><button data-id="${message.id}" data-decision="approved">Take action</button><button data-id="${message.id}" data-decision="deferred">Defer</button><button data-id="${message.id}" data-decision="dismissed">Dismiss</button></div>`;
-    return `<article class="message ${message.priority} ${message.decision ? 'done' : ''}"><div class="message-head"><div class="message-labels"><span class="classification">${escapeHtml(message.classification || 'FYI')}</span><span class="priority">${labels[message.priority]}</span></div><span class="score">${message.score}/100 signal</span></div><p class="message-text">${escapeHtml(message.text)}</p><div class="metadata"><span>${escapeHtml(message.channel)}</span><span>from ${escapeHtml(message.sender)}</span><span>${new Date(message.created_at).toLocaleString()}</span></div><p class="reason">${escapeHtml(message.reason)}</p>${renderContext(message)}${renderActions(message)}${renderDecisionMemory(message)}<div class="message-footer"><span class="suggestion">${escapeHtml(message.suggested_action)}</span>${actions}</div></article>`;
+    return `<article class="message ${message.priority} ${message.decision ? 'done' : ''}"><div class="message-head"><div class="message-labels"><span class="classification">${escapeHtml(message.classification || 'FYI')}</span><span class="priority">${labels[message.priority]}</span></div><span class="score">${message.score}/100 signal</span></div><p class="message-text">${escapeHtml(message.text)}</p><div class="metadata"><span>#${escapeHtml(channelName(message))}</span><span>from ${escapeHtml(senderName(message))}</span><span>${new Date(message.created_at).toLocaleString()}</span></div><p class="reason">${escapeHtml(message.reason)}</p>${renderContext(message)}${renderActions(message)}${renderDecisionMemory(message)}<div class="message-footer"><span class="suggestion">${escapeHtml(message.suggested_action)}</span>${actions}</div></article>`;
   }).join('') : '<p class="empty-state">No messages in this classification yet.</p>';
 }
 async function load() { const response = await fetch('/api/messages'); if (!response.ok) throw new Error(); render((await response.json()).messages); }

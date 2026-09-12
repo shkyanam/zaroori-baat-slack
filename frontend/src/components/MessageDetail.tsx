@@ -1,3 +1,4 @@
+import { channelName, senderName, slackSourceLabel } from '../slackIdentity';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -5,17 +6,16 @@ import {
   ArrowRight,
   ArrowUpRight,
   BookOpen,
+  CalendarDays,
   Check,
   CheckCheck,
   ChevronDown,
   Clock3,
   Copy,
   FileText,
-  Hash,
-  Layers3,
   ListTodo,
   MessageCircle,
-  MessageSquare,
+  PencilLine,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -25,6 +25,15 @@ import {
 } from 'lucide-react';
 import type { Message, ReviewDecision } from '../types';
 import { api } from '../api';
+import SlackMark from './SlackMark';
+import SlackSource from './SlackSource';
+import StatusPill, {
+  ClassificationPill,
+  ConfidencePill,
+  PriorityPill,
+  ReviewPill,
+  WorkTypePill,
+} from './StatusPill';
 import styles from './MessageDetail.module.css';
 
 const steps = ['Understand', 'Prepare', 'Decide'] as const;
@@ -193,9 +202,9 @@ export default function MessageDetail({
     <section className={styles.detail} aria-label="Message detail">
       <header className={styles.detailHeader}>
         <span className={styles.headerMark}>
-          <Sparkles size={18} />
+          <SlackMark size={18} />
         </span>
-        <span className={styles.headerTitle}>One conversation at a time</span>
+        <span className={styles.headerTitle}>Slack conversation</span>
         {safePermalink && (
           <a href={safePermalink} target="_blank" rel="noreferrer" className={styles.slackLink}>
             Open in Slack <ArrowUpRight size={15} />
@@ -238,36 +247,17 @@ export default function MessageDetail({
           {step === 0 && (
             <>
               <div className={styles.eyebrow}>
-                <span className={`${styles.priority} ${styles[message.priority]}`}>
-                  <i />
-                  {message.priority} priority
-                </span>
-                <span>
-                  <Hash size={12} />
-                  {message.channel.replace(/^#/, '')}
-                </span>
+                <PriorityPill priority={message.priority} />
+                <ClassificationPill classification={message.classification} />
               </div>
               <h2 className={styles.title}>{title}</h2>
               <p className={styles.rationale}>{concise(message.reason, 155)}</p>
               <div className={styles.glance}>
-                <div>
-                  <UserRound size={17} />
-                  <span>
-                    Owner<strong>{owner || 'Unassigned'}</strong>
-                  </span>
-                </div>
-                <div>
-                  <Clock3 size={17} />
-                  <span>
-                    Due<strong>{due || 'Not specified'}</strong>
-                  </span>
-                </div>
-                <div>
-                  <Layers3 size={17} />
-                  <span>
-                    Type<strong>{message.classification}</strong>
-                  </span>
-                </div>
+                <StatusPill icon={UserRound} tone={owner ? 'info' : 'neutral'}>
+                  Owner: {owner || 'Unassigned'}
+                </StatusPill>
+                <StatusPill icon={CalendarDays}>Due: {due || 'Not specified'}</StatusPill>
+                <SlackSource channel={channelName(message)} />
               </div>
               {currentAction && (
                 <div className={styles.nextMove}>
@@ -284,18 +274,20 @@ export default function MessageDetail({
                 <details className={styles.disclosure}>
                   <summary>
                     <span className={styles.sourceIcon}>
-                      <MessageSquare size={17} />
+                      <SlackMark size={17} />
                     </span>
                     <span>
                       <strong>Original message</strong>
-                      <small>
-                        {message.sender} ·{' '}
-                        {new Date(message.created_at).toLocaleString([], {
-                          month: 'short',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
+                      <small className={styles.summaryMeta}>
+                        <StatusPill icon={UserRound}>{senderName(message)}</StatusPill>
+                        <StatusPill icon={Clock3}>
+                          {new Date(message.created_at).toLocaleString([], {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </StatusPill>
                       </small>
                     </span>
                     <ChevronDown className={styles.chevron} size={16} />
@@ -316,15 +308,19 @@ export default function MessageDetail({
                     </span>
                     <span>
                       <strong>Context &amp; sources</strong>
-                      <small>
-                        {context.sources?.length || 0} sample sources · {related.length} related
-                        messages
+                      <small className={styles.summaryMeta}>
+                        <StatusPill icon={FileText}>
+                          {context.sources?.length || 0} sample sources
+                        </StatusPill>
+                        <StatusPill icon={MessageCircle} tone="info">
+                          {related.length} related messages
+                        </StatusPill>
                       </small>
                     </span>
                     <ChevronDown className={styles.chevron} size={16} />
                   </summary>
                   <div className={styles.disclosureBody}>
-                    <span className={styles.smallLabel}>Sample sources</span>
+                    <StatusPill icon={FileText}>Sample sources</StatusPill>
                     <p>
                       {context.briefing ||
                         context.summary ||
@@ -381,11 +377,13 @@ export default function MessageDetail({
                         {related.map((item, index) => (
                           <article className={styles.relatedMessage} key={`${item.id}-${index}`}>
                             <div>
-                              <strong>{item.sender}</strong>
-                              <span>{item.channel}</span>
+                              <StatusPill icon={UserRound}>{senderName(item)}</StatusPill>
+                              <SlackSource channel={channelName(item)} />
                             </div>
                             <p>{item.text.replace(/<@([^>]+)>/g, '@$1')}</p>
-                            <small>{item.relationship || 'Related message'}</small>
+                            <StatusPill tone="info" icon={MessageCircle}>
+                              {item.relationship || 'Related message'}
+                            </StatusPill>
                           </article>
                         ))}
                       </details>
@@ -396,14 +394,19 @@ export default function MessageDetail({
                         About this analysis
                         <ChevronDown size={13} />
                       </summary>
-                      <p>
-                        <strong>Signal score: {message.score}/100.</strong> Ranking by urgency and
-                        action terms; not a probability.
-                      </p>
-                      <p>
-                        <strong>Briefing confidence: {confidence}.</strong> Supplied by the analysis
-                        when available.
-                      </p>
+                      <div className={styles.analysisScore}>
+                        <StatusPill tone="info" icon={Sparkles}>
+                          Signal score: {message.score}/100
+                        </StatusPill>
+                        <span className={styles.scoreTrack} aria-hidden="true">
+                          <span
+                            style={{ width: `${Math.min(100, Math.max(0, message.score))}%` }}
+                          />
+                        </span>
+                      </div>
+                      <p>Ranking by urgency and action terms; not a probability.</p>
+                      <ConfidencePill confidence={confidence || 'not provided'} />
+                      <p>Briefing confidence is supplied by the analysis when available.</p>
                     </details>
                     <button
                       className={styles.textButton}
@@ -428,8 +431,13 @@ export default function MessageDetail({
                       </span>
                       <span>
                         <strong>Work &amp; decisions</strong>
-                        <small>
-                          {ownItems.length} work items from this message · includes related context
+                        <small className={styles.summaryMeta}>
+                          <StatusPill icon={ListTodo} tone="success" title="From this message">
+                            {ownItems.length} work items
+                          </StatusPill>
+                          {items.some((item) => !item.source_message_ids?.includes(message.id)) && (
+                            <StatusPill icon={MessageCircle}>Related context</StatusPill>
+                          )}
                         </small>
                       </span>
                       <ChevronDown className={styles.chevron} size={16} />
@@ -442,30 +450,26 @@ export default function MessageDetail({
                       {items.map((item, index) => (
                         <article className={styles.workItem} key={index}>
                           <div>
-                            <span className={styles.smallLabel}>{item.type}</span>
-                            <small>
+                            <WorkTypePill type={item.type} />
+                            <StatusPill icon={MessageCircle}>
                               {item.source_message_ids?.includes(message.id)
                                 ? 'This message'
                                 : 'Related context'}
-                            </small>
+                            </StatusPill>
                           </div>
                           <h3>{item.title}</h3>
                           <div className={styles.workMeta}>
-                            <span>
-                              <UserRound size={12} />
+                            <StatusPill icon={UserRound} tone={item.owner ? 'info' : 'neutral'}>
                               {item.owner || 'No owner'}
-                            </span>
-                            <span>
-                              <Clock3 size={12} />
-                              {item.due || 'No due date'}
-                            </span>
+                            </StatusPill>
+                            <StatusPill icon={CalendarDays}>{item.due || 'No due date'}</StatusPill>
+                            <ConfidencePill confidence={item.confidence || 'not provided'} />
                           </div>
-                          <small>
-                            {item.confidence
-                              ? `${item.confidence} confidence`
-                              : 'Confidence not provided'}
-                            {item.source && ` · ${item.source}`}
-                          </small>
+                          {item.source && (
+                            <StatusPill icon={MessageCircle}>
+                              {slackSourceLabel(item.source, [message, ...related])}
+                            </StatusPill>
+                          )}
                         </article>
                       ))}
                       {decisions.map((decision, index) => (
@@ -474,15 +478,14 @@ export default function MessageDetail({
                           key={`decision-${index}`}
                         >
                           <div>
-                            <span className={styles.smallLabel}>
-                              <BookOpen size={12} />
+                            <StatusPill tone="memory" icon={BookOpen}>
                               Extracted decision
-                            </span>
-                            <small>
+                            </StatusPill>
+                            <StatusPill icon={MessageCircle}>
                               {decision.source_message_ids?.includes(message.id)
                                 ? 'This message'
                                 : 'Related context'}
-                            </small>
+                            </StatusPill>
                           </div>
                           <h3>{decision.decision}</h3>
                           {decision.rationale && <p>{decision.rationale}</p>}
@@ -492,7 +495,33 @@ export default function MessageDetail({
                             </small>
                           )}
                           {!!decision.participants?.length && (
-                            <small>Participants: {decision.participants.join(', ')}</small>
+                            <div className={styles.participants} aria-label="Participants">
+                              {decision.participants.map((participant, participantIndex) => (
+                                <StatusPill
+                                  key={`${participant}-${participantIndex}`}
+                                  icon={UserRound}
+                                  tone="memory"
+                                  title="Participant"
+                                >
+                                  {participant}
+                                </StatusPill>
+                              ))}
+                            </div>
+                          )}
+                          {(decision.date || decision.confidence) && (
+                            <div className={styles.workMeta}>
+                              {decision.date && (
+                                <StatusPill icon={CalendarDays}>{decision.date}</StatusPill>
+                              )}
+                              {decision.confidence && (
+                                <ConfidencePill confidence={decision.confidence} />
+                              )}
+                            </div>
+                          )}
+                          {decision.source && (
+                            <StatusPill icon={MessageCircle}>
+                              {slackSourceLabel(decision.source, [message, ...related])}
+                            </StatusPill>
                           )}
                         </article>
                       ))}
@@ -512,7 +541,7 @@ export default function MessageDetail({
                   <span className={styles.stepEyebrow}>Make it yours</span>
                   <h2 className={styles.title}>A head start on your reply.</h2>
                   <p className={styles.rationale}>
-                    Fine-tune the draft, then copy it when you’re ready.
+                    Fine-tune the draft, then copy it into Slack when you’re ready.
                   </p>
                 </div>
               </div>
@@ -522,18 +551,22 @@ export default function MessageDetail({
                     <Sparkles size={15} />
                     Suggested response
                   </span>
-                  <span className={styles.smallLabel}>Draft · not sent</span>
+                  <StatusPill tone="warning" icon={PencilLine}>
+                    Draft · not sent
+                  </StatusPill>
                 </div>
                 <div className={styles.replyTo}>
                   <span className={styles.avatar}>
-                    {message.sender
+                    {senderName(message)
                       .replace(/[^a-z]/gi, '')
                       .slice(0, 2)
                       .toUpperCase() || 'SL'}
                   </span>
                   <span>
-                    To {message.sender}
-                    <small>{message.channel}</small>
+                    To {senderName(message)}
+                    <small>
+                      <SlackSource channel={channelName(message)} />
+                    </small>
                   </span>
                 </div>
                 <label className="sr-only" htmlFor={`draft-${message.id}`}>
@@ -547,11 +580,13 @@ export default function MessageDetail({
                   rows={4}
                 />
                 <div className={styles.draftFooter}>
-                  <span>
-                    {dirty
-                      ? 'Edited locally · kept in this tab'
-                      : 'Suggested draft · ready to edit'}
-                  </span>
+                  <StatusPill
+                    tone={dirty ? 'info' : 'neutral'}
+                    icon={dirty ? PencilLine : Sparkles}
+                    title={dirty ? 'Kept in this browser tab' : 'Suggested draft'}
+                  >
+                    {dirty ? 'Edited locally' : 'Ready to edit'}
+                  </StatusPill>
                   <div>
                     {dirty && (
                       <button
@@ -591,25 +626,37 @@ export default function MessageDetail({
           {step === 2 &&
             (savedDecision ? (
               <div className={styles.receipt} role={justSaved ? 'status' : undefined}>
-                <div className={styles.receiptArt}>
+                <div className={styles.receiptArt} data-decision={savedDecision}>
                   <span />
                   <span />
                   <span />
                   <div>
-                    {savedDecision === 'deferred' ? <Clock3 size={38} /> : <CheckCheck size={38} />}
+                    {savedDecision === 'deferred' ? (
+                      <Clock3 size={38} />
+                    ) : savedDecision === 'dismissed' ? (
+                      <X size={38} />
+                    ) : savedDecision === 'escalated' ? (
+                      <ArrowUpRight size={38} />
+                    ) : (
+                      <CheckCheck size={38} />
+                    )}
                   </div>
                 </div>
                 <span className={styles.stepEyebrow}>
                   {justSaved ? 'Saved. You’re all set.' : 'Previously reviewed'}
                 </span>
+                <div className={styles.receiptStatus}>
+                  <ReviewPill decision={savedDecision} />
+                </div>
                 <h2 className={styles.title}>{receiptTitle}</h2>
                 <p className={styles.rationale}>{receiptDescription}</p>
                 <div className={styles.reviewedMessage}>
-                  <MessageSquare size={18} />
+                  <SlackMark size={18} />
                   <span>
                     {title}
-                    <small>
-                      {message.channel} · {message.sender}
+                    <small className={styles.receiptMeta}>
+                      <SlackSource channel={channelName(message)} />
+                      <StatusPill icon={UserRound}>{senderName(message)}</StatusPill>
                     </small>
                   </span>
                 </div>
@@ -633,17 +680,15 @@ export default function MessageDetail({
                   Approve the recommendation, or set it aside for later.
                 </p>
                 <div className={styles.decisionCard}>
-                  <span className={styles.smallLabel}>Recommendation to review</span>
+                  <StatusPill tone="info" icon={ListTodo}>
+                    Recommendation to review
+                  </StatusPill>
                   <h3>{currentAction || title}</h3>
                   <div>
-                    <span>
-                      <Hash size={13} />
-                      {message.channel.replace(/^#/, '')}
-                    </span>
-                    <span>
-                      <UserRound size={13} />
-                      {owner || message.sender}
-                    </span>
+                    <SlackSource channel={channelName(message)} />
+                    <StatusPill icon={UserRound} tone="info">
+                      {owner || senderName(message)}
+                    </StatusPill>
                   </div>
                   <p>Applies to this message’s recommendation. Extracted tasks stay unchanged.</p>
                 </div>

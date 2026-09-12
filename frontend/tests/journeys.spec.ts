@@ -410,11 +410,11 @@ test('supporting workspaces fit a mobile viewport and navigation works', async (
   await page.goto('/#/inbox');
   await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
   await page
-    .getByRole('dialog', { name: 'Your workspace', exact: true })
+    .getByRole('dialog', { name: 'Slack workspace', exact: true })
     .getByRole('link', { name: 'Action items', exact: true })
     .click();
   await expect(page.getByRole('heading', { name: 'Action items', exact: true })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Your workspace', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Slack workspace', exact: true })).toHaveCount(0);
   await expect
     .poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true);

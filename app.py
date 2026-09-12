@@ -10,6 +10,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -18,19 +19,21 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator, TypedDict
 from urllib.parse import parse_qs, unquote, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from langsmith import traceable
 from langgraph.graph import END, START, StateGraph
 
 ROOT = Path(__file__).parent
-DATABASE_PATH = ROOT / "zaroori_baat_slack.sqlite3"
 
 
 def load_local_env() -> None:
     if os.environ.get("ZAROORI_BAAT_SKIP_ENV") == "1":
         return
-    env_path = ROOT / ".env"
+    env_path = Path(os.environ.get("ZAROORI_BAAT_ENV_FILE", ".env"))
+    if not env_path.is_absolute():
+        env_path = ROOT / env_path
     if not env_path.exists():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -42,10 +45,14 @@ def load_local_env() -> None:
 
 
 load_local_env()
+DATABASE_PATH = Path(os.environ.get("ZAROORI_BAAT_DATABASE_PATH", "zaroori_baat_slack.sqlite3"))
+if not DATABASE_PATH.is_absolute():
+    DATABASE_PATH = ROOT / DATABASE_PATH
+SEED_DEMO = os.environ.get("ZAROORI_BAAT_SEED_DEMO", "true").lower() in {"1", "true", "yes", "on"}
 HOST = os.environ.get("ZAROORI_BAAT_SLACK_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ZAROORI_BAAT_SLACK_PORT", "8001"))
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
 SLACK_CHANNEL_IDS = [
     channel_id.strip()
@@ -1059,6 +1066,7 @@ def search_decision_memories(query: str) -> dict[str, Any]:
         else:
             matches = local_matches
             status = "mem0_empty_local_fallback"
+    matches = with_slack_identity_names(matches)
     answer = call_llm_decision_memory_answer(query, matches)
     if answer is None:
         answer = (
@@ -1371,8 +1379,19 @@ def connection() -> Iterator[sqlite3.Connection]:
 
 
 def initialize_database() -> None:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connection() as database:
         database.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        database.execute("""
+            CREATE TABLE IF NOT EXISTS slack_identity_cache (
+                namespace TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                slack_id TEXT NOT NULL,
+                display_name TEXT,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY (namespace, kind, slack_id)
+            )
+        """)
         database.execute(
             """
             CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -1460,6 +1479,177 @@ def initialize_database() -> None:
                     (json.dumps(fallback_decisions), row[0]),
                 )
         database.commit()
+
+
+_SLACK_IDENTITY_LOCK = RLock()
+_SLACK_IDENTITY_EXECUTOR: ThreadPoolExecutor | None = None
+_SLACK_IDENTITY_PENDING: set[tuple[str, str, str, str]] = set()
+_SLACK_IDENTITY_BACKOFF: dict[tuple[str, str], float] = {}
+SLACK_IDENTITY_TTL_SECONDS = 6 * 60 * 60
+SLACK_IDENTITY_RETRY_SECONDS = 5 * 60
+SLACK_IDENTITY_TIMEOUT_SECONDS = 3
+
+
+def _slack_identity_rows(database_path: Path, namespace: str) -> dict[tuple[str, str], tuple[str | None, float]]:
+    database = sqlite3.connect(database_path, timeout=3)
+    try:
+        return {
+            (row[0], row[1]): (row[2], row[3])
+            for row in database.execute(
+                "SELECT kind, slack_id, display_name, expires_at FROM slack_identity_cache WHERE namespace = ?",
+                (namespace,),
+            )
+        }
+    finally:
+        database.close()
+
+
+def _fetch_slack_identity(database_path: Path, namespace: str, token: str, kind: str, slack_id: str) -> None:
+    """Background-only lookup; failures retain any previously resolved name."""
+    cache = _slack_identity_rows(database_path, namespace)
+    existing = cache.get((kind, slack_id))
+    now = time.time()
+    if existing and existing[1] > now:
+        return
+    with _SLACK_IDENTITY_LOCK:
+        if _SLACK_IDENTITY_BACKOFF.get((namespace, kind), 0) > now:
+            return
+    method, parameter = ("users.info", "user") if kind == "sender" else ("conversations.info", "channel")
+    display_name = None
+    retry_seconds = SLACK_IDENTITY_RETRY_SECONDS
+    method_backoff = False
+    authorization_error = False
+    try:
+        request = Request(
+            f"https://slack.com/api/{method}?{parameter}={slack_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urlopen(request, timeout=SLACK_IDENTITY_TIMEOUT_SECONDS) as response:
+            result = json.loads(response.read())
+        if result.get("ok"):
+            identity = result.get("user" if kind == "sender" else "channel") or {}
+            profile = (identity.get("profile") or {}) if kind == "sender" else {}
+            candidates = (
+                [profile.get("display_name"), profile.get("real_name"), identity.get("real_name"), identity.get("name")]
+                if kind == "sender" else [identity.get("name")]
+            )
+            display_name = next((value.strip() for value in candidates if isinstance(value, str) and value.strip()), None)
+        elif result.get("error") in {"missing_scope", "not_authed", "invalid_auth", "token_revoked", "account_inactive"}:
+            retry_seconds = 60 * 60
+            method_backoff = True
+            authorization_error = True
+        elif result.get("error") == "ratelimited":
+            method_backoff = True
+    except HTTPError as error:
+        if error.code == 429:
+            try:
+                retry_seconds = max(SLACK_IDENTITY_RETRY_SECONDS, float(error.headers.get("Retry-After", "0")))
+            except (TypeError, ValueError):
+                pass
+            method_backoff = True
+    except Exception:  # Identity availability must never break message/review APIs.
+        pass
+    expires_at = time.time() + (SLACK_IDENTITY_TTL_SECONDS if display_name else retry_seconds)
+    if method_backoff:
+        with _SLACK_IDENTITY_LOCK:
+            _SLACK_IDENTITY_BACKOFF[(namespace, kind)] = expires_at
+    if authorization_error:
+        # Reinstalling an app can change its scopes without changing its token.
+        # A backend restart must recover immediately after that permission fix.
+        expires_at = 0
+    database = sqlite3.connect(database_path, timeout=3)
+    try:
+        with database:
+            database.execute(
+                "INSERT INTO slack_identity_cache (namespace, kind, slack_id, display_name, expires_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(namespace, kind, slack_id) DO UPDATE SET "
+                "display_name = COALESCE(excluded.display_name, slack_identity_cache.display_name), "
+                "expires_at = excluded.expires_at",
+                (namespace, kind, slack_id, display_name, expires_at),
+            )
+    finally:
+        database.close()
+
+
+def _queue_slack_identity(database_path: Path, namespace: str, token: str, kind: str, slack_id: str) -> None:
+    global _SLACK_IDENTITY_EXECUTOR
+    key = (str(database_path), namespace, kind, slack_id)
+    with _SLACK_IDENTITY_LOCK:
+        if key in _SLACK_IDENTITY_PENDING or len(_SLACK_IDENTITY_PENDING) >= 128:
+            return
+        if _SLACK_IDENTITY_BACKOFF.get((namespace, kind), 0) > time.time():
+            return
+        if _SLACK_IDENTITY_EXECUTOR is None:
+            _SLACK_IDENTITY_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="slack-names")
+        _SLACK_IDENTITY_PENDING.add(key)
+
+        def resolve() -> None:
+            try:
+                _fetch_slack_identity(database_path, namespace, token, kind, slack_id)
+            except Exception:
+                # A temporary local cache error is also safe to retry on a later read.
+                pass
+            finally:
+                with _SLACK_IDENTITY_LOCK:
+                    _SLACK_IDENTITY_PENDING.discard(key)
+
+        _SLACK_IDENTITY_EXECUTOR.submit(resolve)
+
+
+def with_slack_identity_names(payload: Any) -> Any:
+    """Add display fields without changing routing IDs or waiting for Slack.
+
+    Walk response dictionaries only, including related messages and memory
+    metadata. Stored content and its original authors/channel IDs stay intact.
+    Stale successful names remain visible while a background refresh runs.
+    """
+    identities: set[tuple[str, str]] = set()
+
+    def copy_value(value: Any, demo: bool = False) -> Any:
+        if isinstance(value, list):
+            return [copy_value(item, demo) for item in value]
+        if not isinstance(value, dict):
+            return value
+        demo = demo or str(value.get("external_id", "")).startswith("demo-")
+        result = {key: copy_value(item, demo) for key, item in value.items()}
+        for kind, pattern in (("sender", r"[UW][A-Z0-9]{8,}"), ("channel", r"[CGD][A-Z0-9]{8,}")):
+            raw = value.get(kind)
+            if isinstance(raw, str):
+                result[kind + "_name"] = value.get(kind + "_name") or raw
+                if not demo and re.fullmatch(pattern, raw):
+                    identities.add((kind, raw))
+        return result
+
+    result = copy_value(payload)
+    token = SLACK_BOT_TOKEN
+    if not token or not identities:
+        return result
+    namespace = hashlib.sha256(token.encode()).hexdigest()[:24]
+    try:
+        cache = _slack_identity_rows(DATABASE_PATH, namespace)
+    except sqlite3.Error:
+        return result
+    now = time.time()
+    for kind, slack_id in sorted(identities):
+        existing = cache.get((kind, slack_id))
+        if not existing or existing[1] <= now:
+            _queue_slack_identity(DATABASE_PATH, namespace, token, kind, slack_id)
+
+    def apply_names(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                apply_names(item)
+        elif isinstance(value, dict):
+            for kind in ("sender", "channel"):
+                raw = value.get(kind)
+                cached = cache.get((kind, raw)) if isinstance(raw, str) else None
+                if cached and cached[0]:
+                    value[kind + "_name"] = cached[0]
+            for item in value.values():
+                apply_names(item)
+
+    apply_names(result)
+    return result
 
 
 def record_workflow_start(run_id: str, message_id: str, channel: str | None) -> None:
@@ -1551,7 +1741,7 @@ def observability_summary() -> dict[str, Any]:
             ORDER BY COUNT(*) DESC, classification
             """
         ).fetchall()
-    return {
+    return with_slack_identity_names({
         "workflow": langgraph_status(),
         "langsmith": langsmith_status(),
         "metrics": {
@@ -1579,7 +1769,7 @@ def observability_summary() -> dict[str, Any]:
             }
             for row in rows
         ],
-    }
+    })
 
 
 _LANGGRAPH_GRAPH: Any | None = None
@@ -1951,7 +2141,7 @@ def get_message(message_id: str) -> dict[str, Any]:
         row = database.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
     if row is None:
         raise KeyError(message_id)
-    return message_from_row(row)
+    return with_slack_identity_names(message_from_row(row))
 
 
 def list_messages() -> list[dict[str, Any]]:
@@ -1962,7 +2152,7 @@ def list_messages() -> list[dict[str, Any]]:
                      CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
                      score DESC, created_at DESC
         """).fetchall()
-    return [message_from_row(row) for row in rows]
+    return with_slack_identity_names([message_from_row(row) for row in rows])
 
 
 def refresh_message_context(message_id: str) -> dict[str, Any]:
@@ -2245,7 +2435,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     initialize_database()
-    seed_demo()
+    if SEED_DEMO:
+        seed_demo()
+    if SLACK_BOT_TOKEN:
+        # Warm existing imports without reprocessing or changing their decisions.
+        list_messages()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"Zaroori Baat Slack running at http://{HOST}:{PORT}")

@@ -1,4 +1,4 @@
-﻿.page {
+.page {
   width: 100%;
   max-width: 1280px;
   margin: 0 auto;
@@ -76,10 +76,9 @@
   align-items: center;
   flex-shrink: 0;
   padding: 21px 27px;
-  border-radius: 24px;
+  border-radius: var(--radius-feature);
   background: var(--brand-soft);
   color: var(--brand-ink);
-  transform: rotate(3deg);
 }
 .heroToken strong {
   font-family: var(--font-display);
@@ -114,7 +113,7 @@
   display: inline-flex;
   gap: var(--space-2);
   align-items: center;
-  border-radius: 30px;
+  border-radius: var(--radius-feature);
   cursor: pointer;
   font-size: var(--text-sm);
   white-space: nowrap;
@@ -127,8 +126,9 @@
   color: var(--ink);
 }
 .tabs .activeTab {
-  background: var(--brand);
-  color: var(--on-focus);
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-ink) 14%, transparent);
 }
 .tabs button span {
   opacity: 1;
@@ -150,7 +150,7 @@
   gap: var(--space-3);
   padding: var(--space-4);
   background: var(--surface-muted);
-  border-radius: 18px;
+  border-radius: var(--radius-feature);
   margin: -11px 0 var(--space-6);
 }
 .search {
@@ -195,8 +195,8 @@
   --lane-ink: var(--brand-ink);
 }
 .riskLane {
-  --lane-color: var(--accent-hover);
-  --lane-ink: var(--accent-ink);
+  --lane-color: var(--warning-soft);
+  --lane-ink: var(--warning);
 }
 .laneHeader {
   display: flex;
@@ -207,7 +207,7 @@
 .laneIcon {
   width: 45px;
   height: 45px;
-  border-radius: 16px;
+  border-radius: var(--radius-feature);
   display: grid;
   place-items: center;
   background: var(--lane-color);
@@ -219,9 +219,8 @@
   letter-spacing: -0.025em;
   margin: 0 0 5px;
 }
-.laneHeader > div > span {
-  font-size: var(--text-xs);
-  color: var(--muted);
+.laneHeader > div {
+  min-width: 0;
 }
 .laneCards {
   display: flex;
@@ -261,8 +260,8 @@
     box-shadow var(--duration-normal);
 }
 .actionCard:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--ink) 9%, transparent);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-hover);
 }
 .channelLabel {
   display: inline-flex;
@@ -291,8 +290,9 @@
 }
 .actionMeta {
   display: flex;
-  flex-direction: column;
-  gap: 11px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 7px;
   margin-bottom: var(--space-5);
   color: var(--muted);
   font-size: var(--text-xs);
@@ -334,6 +334,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 9px;
+  flex-wrap: wrap;
 }
 .extractedLabel {
   color: var(--muted);
@@ -452,14 +453,14 @@
   font-size: var(--text-xs);
   background: var(--brand-soft);
   color: var(--brand-ink);
-  border-radius: 20px;
+  border-radius: var(--radius-feature);
   letter-spacing: 0;
 }
 .memorySearch {
   display: flex;
   align-items: center;
   background: var(--memory-soft);
-  border-radius: 28px;
+  border-radius: var(--radius-feature);
   padding: 31px 35px;
   position: relative;
   overflow: hidden;
@@ -565,7 +566,7 @@
   left: 55px;
   width: 84px;
   height: 93px;
-  border-radius: 19px;
+  border-radius: var(--radius-feature);
   background: var(--surface);
   color: var(--memory);
   display: grid;
@@ -579,7 +580,7 @@
   left: 13px;
   width: 45px;
   height: 45px;
-  border-radius: 15px;
+  border-radius: var(--radius-feature);
   background: var(--focus-bg);
   color: var(--accent);
   display: grid;
@@ -629,7 +630,7 @@
 }
 .answer {
   background: var(--brand-soft);
-  border-radius: 18px;
+  border-radius: var(--radius-feature);
   padding: 22px;
   margin-bottom: 25px;
 }
@@ -648,21 +649,11 @@
   font-size: var(--text-xs);
   color: var(--muted);
 }
-.cardMeta > span {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-}
 .cardMeta > strong {
   font-size: var(--text-sm);
   color: var(--brand-ink);
 }
 .provider {
-  font-size: var(--text-xs);
-  padding: var(--space-1) var(--space-2);
-  border-radius: 20px;
-  background: var(--brand-soft);
-  color: var(--brand-ink);
   margin-left: auto;
 }
 .evidenceGrid {
@@ -674,7 +665,7 @@
   display: flex;
   flex-direction: column;
   padding: 21px;
-  border-radius: 18px;
+  border-radius: var(--radius-feature);
   background: var(--surface-subtle);
 }
 .evidenceCard .cardMeta > time {
@@ -716,6 +707,7 @@
 }
 .decisionTop {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
@@ -748,18 +740,21 @@
 .decisionMeta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: 7px;
   margin-bottom: var(--space-5);
   min-height: 30px;
 }
-.decisionMeta > span {
-  display: inline-flex;
+.participantPills,
+.metadataPills {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: var(--text-xs);
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.participantPills {
+  width: 100%;
 }
 .decisionMeta .participantStack {
   gap: 0;
@@ -775,8 +770,8 @@
   color: var(--success);
 }
 .participantStack .avatar:nth-child(3) {
-  background: var(--accent-hover);
-  color: var(--accent-ink);
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 .participantStack .avatar:first-child {
   margin-left: 0;
@@ -846,6 +841,7 @@
 }
 .decisionFooter {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 13px;
@@ -870,7 +866,7 @@
   height: 47px;
   display: grid;
   place-items: center;
-  border-radius: 16px;
+  border-radius: var(--radius-feature);
   background: var(--surface);
   color: var(--warning);
   flex-shrink: 0;
@@ -932,7 +928,7 @@
   color: var(--danger);
   border: 1px solid var(--danger-soft);
   padding: 17px var(--space-5);
-  border-radius: 15px;
+  border-radius: var(--radius-feature);
   font-size: var(--text-sm);
   line-height: 1.6;
 }
@@ -989,7 +985,7 @@
 .connectionIcon {
   width: 54px;
   height: 54px;
-  border-radius: 18px;
+  border-radius: var(--radius-feature);
   background: var(--success-soft);
   color: var(--success);
   display: grid;
@@ -1077,6 +1073,9 @@
   display: block;
   margin-top: 15px;
 }
+.integrationMetadata {
+  margin: 10px 0;
+}
 .preferences {
   padding: 29px 30px;
   display: flex;
@@ -1094,7 +1093,7 @@
 .preferenceIcon {
   width: 62px;
   height: 62px;
-  border-radius: 21px;
+  border-radius: var(--radius-feature);
   background: var(--surface);
   color: var(--brand-ink);
   display: grid;
@@ -1255,7 +1254,7 @@
   place-items: center;
   background: var(--focus-raised);
   border: 1px solid color-mix(in srgb, var(--on-focus) 12%, transparent);
-  border-radius: 13px;
+  border-radius: var(--radius-feature);
   color: var(--accent);
 }
 .workflowStage strong {
@@ -1330,7 +1329,7 @@
 }
 .activityCard {
   padding: 22px;
-  border-radius: 18px;
+  border-radius: var(--radius-feature);
   background: var(--surface-subtle);
 }
 .activityCard .sectionHeading h3 {
@@ -1365,14 +1364,24 @@
   display: block;
   height: 100%;
   border-radius: 10px;
-  background: var(--success);
+  background: var(--muted);
   min-width: 2px;
 }
-.barRow:nth-child(3n + 2) .barTrack > span {
+.barRow[data-signal='Decision Needed'] .barTrack > span {
   background: var(--memory);
 }
-.barRow:nth-child(3n) .barTrack > span {
-  background: var(--accent);
+.barRow[data-signal='Approval Request'] .barTrack > span {
+  background: var(--warning);
+}
+.barRow[data-signal='Incident'] .barTrack > span,
+.barRow[data-signal='Escalation'] .barTrack > span {
+  background: var(--danger);
+}
+.barRow[data-signal='Action Required'] .barTrack > span {
+  background: var(--success);
+}
+.barRow[data-signal='Question'] .barTrack > span {
+  background: var(--brand);
 }
 .traceCopy {
   font-size: var(--text-base);
@@ -1402,7 +1411,7 @@
 .tableScroll {
   overflow-x: auto;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: var(--radius-feature);
 }
 .runTable {
   width: 100%;
@@ -1430,6 +1439,9 @@
   font-size: var(--text-xs);
   line-height: 1.6;
   margin-top: 5px;
+}
+.runSignal {
+  margin-top: 7px;
 }
 .runTable td:last-child {
   white-space: nowrap;
@@ -1490,7 +1502,7 @@
 .loadingCard span:first-child {
   width: 46px;
   height: 46px;
-  border-radius: 14px;
+  border-radius: var(--radius-feature);
 }
 .loadingCard span:last-child {
   width: 80%;
@@ -1531,7 +1543,7 @@
   .laneIcon {
     width: 39px;
     height: 39px;
-    border-radius: 13px;
+    border-radius: var(--radius-feature);
   }
   .extractedLabel {
     display: none;
@@ -1769,7 +1781,7 @@
   .actionMeta {
     flex-direction: row;
     flex-wrap: wrap;
-    gap: 15px;
+    gap: 7px;
   }
   .extractedLabel {
     display: block;
@@ -1786,7 +1798,7 @@
     margin-top: 3px;
   }
   .memorySearch {
-    border-radius: 23px;
+    border-radius: var(--radius-feature);
     padding: 23px 21px;
   }
   .memorySearchHeading {
@@ -1869,7 +1881,7 @@
   .pendingIcon {
     width: 38px;
     height: 38px;
-    border-radius: 13px;
+    border-radius: var(--radius-feature);
   }
   .pendingSummary strong {
     font-size: var(--text-base);
@@ -1887,7 +1899,7 @@
   .connectionIcon {
     width: 46px;
     height: 46px;
-    border-radius: 15px;
+    border-radius: var(--radius-feature);
   }
   .integrationCard h3 {
     font-size: var(--text-base);

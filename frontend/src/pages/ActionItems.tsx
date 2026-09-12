@@ -1,4 +1,7 @@
-﻿import { useMemo, useState } from 'react';
+import { channelName, senderName } from '../slackIdentity';
+import SlackSource from '../components/SlackSource';
+import StatusPill, { WorkTypePill } from '../components/StatusPill';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowUpRight,
@@ -7,7 +10,6 @@ import {
   ChevronDown,
   CircleAlert,
   CornerDownRight,
-  Hash,
   ListTodo,
   Search,
   SlidersHorizontal,
@@ -42,15 +44,6 @@ function meaningfulOwner(owner?: string | null): string {
   if (!owner || /^(unknown|none|unassigned|not specified|tbd|n\/a)$/i.test(owner.trim())) return '';
   return owner.trim();
 }
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((part) => part[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
 export default function ActionItems({
   messages,
   loading = false,
@@ -115,7 +108,7 @@ export default function ActionItems({
     (item) =>
       (kind === 'all' || item.kind === kind) &&
       (owner === 'all' || (owner === 'unassigned' ? !item.owner : item.owner === owner)) &&
-      `${item.title} ${item.owner} ${item.message.channel} ${item.message.sender}`
+      `${item.title} ${item.owner} ${item.message.channel} ${channelName(item.message)} ${item.message.sender} ${senderName(item.message)}`
         .toLowerCase()
         .includes(search.trim().toLowerCase()),
   );
@@ -135,7 +128,7 @@ export default function ActionItems({
     <div className={styles.page}>
       <header className={styles.pageIntro}>
         <div>
-          <p className="eyebrow">OUT OF THE THREAD. INTO MOTION.</p>
+          <p className="eyebrow">FROM YOUR SLACK CONVERSATIONS</p>
           <h1>
             Action items
             <span className={styles.headingDot} aria-hidden="true">
@@ -255,15 +248,16 @@ export default function ActionItems({
                       ) : lane === 'follow-up' ? (
                         <CornerDownRight size={23} aria-hidden="true" />
                       ) : (
-                        <Check size={23} aria-hidden="true" />
+                        <ListTodo size={23} aria-hidden="true" />
                       )}
                     </div>
                     <div>
                       <h2>{laneCopy[lane]}</h2>
-                      <span>
-                        {kindLabels[lane]} <span aria-hidden="true">·</span>{' '}
-                        {visible.filter((item) => item.kind === lane).length}
-                      </span>
+                      <StatusPill
+                        tone={lane === 'risk' ? 'danger' : lane === 'follow-up' ? 'memory' : 'info'}
+                      >
+                        {kindLabels[lane]} · {visible.filter((item) => item.kind === lane).length}
+                      </StatusPill>
                     </div>
                   </header>
                   <div className={styles.laneCards} id={`action-lane-${lane}`}>
@@ -276,30 +270,27 @@ export default function ActionItems({
                           key={item.key}
                           data-message-id={item.message.id}
                         >
-                          <span className={styles.channelLabel}>
-                            <Hash size={13} aria-hidden="true" />
-                            {item.message.channel.replace(/^#/, '')}
-                          </span>
+                          <SlackSource channel={channelName(item.message)} />
                           <h3 title={item.title}>{item.title}</h3>
                           <div className={styles.actionMeta}>
-                            <span className={styles.owner}>
-                              <span
-                                className={`${styles.avatar} ${!item.owner ? styles.noOwner : ''}`}
-                                aria-hidden="true"
-                              >
-                                {item.owner ? initials(item.owner) : <UserRound size={13} />}
-                              </span>
+                            <StatusPill
+                              icon={UserRound}
+                              title={item.owner ? 'Identified owner' : undefined}
+                            >
                               {item.owner || 'Owner not identified'}
-                            </span>
+                            </StatusPill>
                             {item.due && (
-                              <span className={styles.due}>
-                                <CalendarDays size={13} aria-hidden="true" />
+                              <StatusPill
+                                icon={CalendarDays}
+                                tone="info"
+                                title="Due date from the conversation"
+                              >
                                 {item.due}
-                              </span>
+                              </StatusPill>
                             )}
                           </div>
                           <footer className={styles.actionFooter}>
-                            <span className={styles.extractedLabel}>From your conversation</span>
+                            <WorkTypePill type={item.type} />
                             <Link
                               className={styles.sourceLink}
                               to={`/inbox?message=${encodeURIComponent(item.message.id)}`}
@@ -356,7 +347,8 @@ export default function ActionItems({
           )}
           <p className={styles.collectionNote}>
             <Sparkles size={14} aria-hidden="true" />
-            Extracted from {messages.length} loaded messages. Review each source before acting.
+            Extracted from {messages.length} loaded Slack messages. Review each source before
+            acting.
           </p>
         </section>
       )}

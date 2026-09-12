@@ -1,3 +1,6 @@
+import { channelName, channelOptions, senderName } from '../slackIdentity';
+import SlackSource from '../components/SlackSource';
+import StatusPill, { ClassificationPill, ReviewPill } from '../components/StatusPill';
 import { useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -7,25 +10,26 @@ import {
   ArrowUpRight,
   Check,
   CheckCheck,
-  ChevronDown,
   ChevronRight,
   Clock3,
   Coffee,
   Flame,
-  ListFilter,
   MessageCircle,
-  Moon,
   RefreshCw,
   Search,
   ShieldAlert,
   Sparkles,
+  UserRound,
   X,
   Zap,
 } from 'lucide-react';
 import { classifications } from '../types';
 import type { Message } from '../types';
 import MessageDetail from '../components/MessageDetail';
+import MessageGroups from '../components/MessageGroups';
 import styles from './Inbox.module.css';
+import DashboardFocus, { messagePreview } from '../components/DashboardFocus';
+import dashboardStyles from './InboxDashboard.module.css';
 
 function subject(message: Message) {
   const clean = message.text
@@ -40,18 +44,6 @@ function assignment(message: Message) {
     (item) =>
       (item.owner || item.due) &&
       (!item.source_message_ids?.length || item.source_message_ids.includes(message.id)),
-  );
-}
-function initials(name: string) {
-  return (
-    name
-      .replace(/[^a-zA-Z\s]/g, '')
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((word) => word[0])
-      .join('')
-      .toUpperCase() || 'SL'
   );
 }
 function iconFor(message: Message) {
@@ -105,14 +97,12 @@ export default function Inbox({
     query ||
     category !== 'all' ||
     priority !== 'all' ||
-      channel !== 'all' ||
-      date !== 'all' ||
-      outcome !== 'all' ||
-      sort !== 'priority',
+    channel !== 'all' ||
+    date !== 'all' ||
+    outcome !== 'all' ||
+    sort !== 'priority',
   );
   const [toolsOpen, setToolsOpen] = useState(hasFilters);
-  const [quietOpen, setQuietOpen] = useState(false);
-  const [showAllRemaining, setShowAllRemaining] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const selectedId = params.get('message');
   const selected = messages.find((m) => m.id === selectedId);
@@ -142,7 +132,11 @@ export default function Inbox({
   const close = () => set('message', '');
   const pending = messages.filter((m) => !m.decision).sort(order);
   const attention = pending.filter((m) => m.classification !== 'FYI');
-  const high = attention.filter((m) => m.priority === 'high');
+  const priorityCounts = {
+    high: pending.filter((message) => message.priority === 'high').length,
+    medium: pending.filter((message) => message.priority === 'medium').length,
+    low: pending.filter((message) => message.priority === 'low').length,
+  };
   const deferred = messages.filter((m) => m.decision === 'deferred');
   const done = messages.filter((m) => m.decision && m.decision !== 'deferred');
   const base = messages.filter((m) =>
@@ -154,7 +148,7 @@ export default function Inbox({
           ? m.decision === 'deferred'
           : !m.decision,
   );
-  const channels = [...new Set(messages.map((m) => m.channel))].sort();
+  const channels = channelOptions(messages);
   const filtered = useMemo(
     () =>
       base
@@ -166,7 +160,7 @@ export default function Inbox({
             (outcome === 'all' || m.decision === outcome) &&
             (date === 'all' ||
               Date.now() - Date.parse(m.created_at) < (date === 'day' ? 1 : 7) * 86400000) &&
-            [m.text, m.sender, m.channel, m.reason]
+            [m.text, m.sender, senderName(m), m.channel, channelName(m), m.reason]
               .join(' ')
               .toLowerCase()
               .includes(query.toLowerCase()),
@@ -187,10 +181,23 @@ export default function Inbox({
   const focus = focused ? attention[0] : undefined;
   const nextUp = focused ? attention.slice(1, 3) : [];
   const featuredIds = new Set([focus?.id, ...nextUp.map((m) => m.id)]);
-  const rows = focused
-    ? filtered.filter((m) => !featuredIds.has(m.id) && m.classification !== 'FYI')
-    : filtered;
-  const quiet = focused ? filtered.filter((m) => m.classification === 'FYI') : [];
+  const rows = focused ? filtered.filter((m) => !featuredIds.has(m.id)) : filtered;
+  const filterSection = (signal: string, urgency: string) =>
+    setParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        for (const [key, value] of [
+          ['signal', signal],
+          ['urgency', urgency],
+        ]) {
+          if (value === 'all') next.delete(key);
+          else next.set(key, value);
+        }
+        next.delete('message');
+        return next;
+      },
+      { replace: true },
+    );
   const nextPending = pending.filter((m) => m.id !== selectedId);
   const clear = () =>
     setParams((previous) => {
@@ -198,8 +205,6 @@ export default function Inbox({
       if (previous.get('view')) next.set('view', previous.get('view')!);
       return next;
     });
-  const FocusIcon = focus ? iconFor(focus) : Sparkles;
-  const focusAssignment = focus ? assignment(focus) : undefined;
 
   const renderRow = (message: Message) => {
     const Icon = iconFor(message);
@@ -218,29 +223,19 @@ export default function Inbox({
         <span className={styles.rowContent}>
           <strong>{subject(message)}</strong>
           <span>
-            #{message.channel.replace(/^#/, '')}
-            <i>·</i>
-            {item?.owner || message.sender}
+            <SlackSource channel={channelName(message)} />
+            <StatusPill icon={UserRound}>{item?.owner || senderName(message)}</StatusPill>
           </span>
         </span>
         <span className={styles.rowStatus}>
           {message.decision ? (
-            <span className="badge">
-              {message.decision === 'approved'
-                ? 'Approved'
-                : message.decision === 'dismissed'
-                  ? 'Dismissed'
-                  : message.decision === 'deferred'
-                    ? 'Deferred'
-                    : 'Escalated'}
-            </span>
+            <ReviewPill decision={message.decision} />
           ) : item?.due ? (
-            <span className={styles.rowDue}>
-              <Clock3 size={12} />
+            <StatusPill icon={Clock3} tone="info" className={styles.rowDue}>
               {item.due}
-            </span>
+            </StatusPill>
           ) : (
-            <span className={styles.rowCategory}>{message.classification}</span>
+            <ClassificationPill classification={message.classification} />
           )}
           <ChevronRight size={17} />
         </span>
@@ -249,53 +244,90 @@ export default function Inbox({
   };
 
   return (
-    <div className={styles.page}>
-      <header className={styles.pageHeading}>
+    <div className={`${styles.page} ${!reviewed ? dashboardStyles.page : ''}`}>
+      <header className={reviewed ? styles.pageHeading : dashboardStyles.heading}>
         <div>
-          <p className="eyebrow">
-            {reviewed
-              ? 'ROOM TO MOVE FORWARD'
-              : new Date()
-                  .toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })
-                  .toUpperCase()}
-          </p>
-          <h1>
-            {reviewed ? (
-              'A little lighter.'
-            ) : (
-              <>
-                Less noise.<span> More headspace.</span>
-              </>
-            )}
-          </h1>
+          {reviewed && <p className="eyebrow">YOUR SLACK REVIEW HISTORY</p>}
+          <h1>{reviewed ? 'A little lighter.' : 'Inbox overview'}</h1>
           <p>
-            {reviewed ? (
-              `${done.length} conversations reviewed. Every call, kept here.`
-            ) : (
-              <>
-                Hi Mitesh.{' '}
-                {high.length ? (
-                  <>
-                    You have <strong>{high.length} important conversations</strong>. Let’s take them
-                    one at a time.
-                  </>
-                ) : (
-                  'Your next clear step is right here.'
-                )}
-              </>
-            )}
+            {reviewed
+              ? `${done.length} Slack conversations reviewed. Every call, kept here.`
+              : 'Your Slack conversations, prioritized.'}
           </p>
         </div>
-        <button
-          className={styles.refresh}
-          onClick={() => void client.invalidateQueries({ queryKey: ['messages'] })}
-          disabled={fetching}
-          aria-label="Refresh queue"
-        >
-          <RefreshCw size={16} className={fetching ? 'spinning' : ''} />
-          <span>{fetching ? 'Refreshing' : 'Refresh'}</span>
-        </button>
+        <div className={dashboardStyles.headingRight}>
+          {!reviewed && (
+            <time dateTime={new Date().toLocaleDateString('en-CA')}>
+              {new Date().toLocaleDateString([], {
+                weekday: 'short',
+                day: 'numeric',
+                month: 'short',
+              })}
+            </time>
+          )}
+          <button
+            className={dashboardStyles.refresh}
+            onClick={() => void client.invalidateQueries({ queryKey: ['messages'] })}
+            disabled={fetching}
+            aria-label="Refresh queue"
+          >
+            <RefreshCw size={14} className={fetching ? 'spinning' : ''} />
+            <span>{fetching ? 'Refreshing' : 'Refresh'}</span>
+          </button>
+        </div>
       </header>
+      {!reviewed && (
+        <dl className={dashboardStyles.metrics} aria-label="Inbox totals" aria-busy={loading}>
+          <div className={dashboardStyles.metric} data-state="pending">
+            <dt>
+              <span className={dashboardStyles.metricIcon}>
+                <MessageCircle size={14} aria-hidden="true" />
+              </span>
+              Needs review
+            </dt>
+            <dd>
+              {loading ? '—' : pending.length}
+              <span>conversations</span>
+            </dd>
+          </div>
+          <div className={dashboardStyles.metric} data-priority="high">
+            <dt>
+              <span className={dashboardStyles.metricIcon}>
+                <Flame size={14} aria-hidden="true" />
+              </span>
+              High priority
+            </dt>
+            <dd>
+              {loading ? '—' : priorityCounts.high}
+              <span>pending</span>
+            </dd>
+          </div>
+          <div className={dashboardStyles.metric} data-state="deferred">
+            <dt>
+              <span className={dashboardStyles.metricIcon}>
+                <Clock3 size={14} aria-hidden="true" />
+              </span>
+              Deferred
+            </dt>
+            <dd>
+              {loading ? '—' : deferred.length}
+              <span>saved for later</span>
+            </dd>
+          </div>
+          <div className={dashboardStyles.metric} data-state="reviewed">
+            <dt>
+              <span className={dashboardStyles.metricIcon}>
+                <CheckCheck size={14} aria-hidden="true" />
+              </span>
+              Reviewed
+            </dt>
+            <dd>
+              {loading ? '—' : done.length}
+              <span>completed reviews</span>
+            </dd>
+          </div>
+        </dl>
+      )}
       {loading ? (
         <div className={styles.loadingFocus} aria-label="Loading your focus" role="status">
           <div className="skeleton" />
@@ -303,106 +335,65 @@ export default function Inbox({
           <div className="skeleton" />
         </div>
       ) : focus ? (
-        <section className={styles.focusGrid} aria-label="Your next conversations">
-          <article
-            data-testid="focus-message"
-            data-message-id={focus.id}
-            className={styles.focusCard}
-          >
-            <div className={styles.focusTop}>
+        <section className={dashboardStyles.focusGrid} aria-label="Your next conversations">
+          <DashboardFocus key={focus.id} message={focus} onOpen={open} />
+          <aside className={dashboardStyles.insights} aria-label="Queue overview">
+            <div className={dashboardStyles.insightHeading}>
+              <h2>Priority balance</h2>
+              <StatusPill icon={Clock3}>{pending.length} pending</StatusPill>
+            </div>
+            <div
+              className={dashboardStyles.balance}
+              role="img"
+              aria-label={`Pending priorities: ${priorityCounts.high} high, ${priorityCounts.medium} medium, ${priorityCounts.low} low`}
+            >
+              {(['high', 'medium', 'low'] as const).map(
+                (level) =>
+                  priorityCounts[level] > 0 && (
+                    <span
+                      key={level}
+                      data-priority={level}
+                      style={{ flex: priorityCounts[level] }}
+                    />
+                  ),
+              )}
+            </div>
+            <div className={dashboardStyles.legend}>
               <span>
-                <span className={styles.pulseDot} />
-                START HERE
+                <strong>{priorityCounts.high}</strong>High
               </span>
-              <span className={styles.focusPriority}>
-                {focus.priority === 'high' ? <Flame size={13} /> : <Sparkles size={13} />}{' '}
-                {focus.priority === 'high' ? 'Worth your attention' : 'Your next conversation'}
-              </span>
-            </div>
-            <div className={styles.focusContent}>
-              <div className={styles.focusWriting}>
-                <span className={styles.focusCategory}>{focus.classification}</span>
-                <h2>{subject(focus)}</h2>
-                <div className={styles.focusPeople}>
-                  <span className={styles.focusAvatar}>
-                    {initials(focusAssignment?.owner || focus.sender)}
-                  </span>
-                  <span>
-                    {focusAssignment?.owner || focus.sender}
-                    <small>#{focus.channel.replace(/^#/, '')}</small>
-                  </span>
-                  {focusAssignment?.due && (
-                    <span className={styles.focusDue}>
-                      <Clock3 size={13} />
-                      {focusAssignment.due}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className={styles.focusVisual} aria-hidden="true">
-                <div className={styles.orbitOne} />
-                <div className={styles.orbitTwo} />
-                <div className={styles.orbitThree} />
-                <div className={styles.orb}>
-                  <FocusIcon size={38} strokeWidth={1.2} />
-                </div>
-                <span className={styles.orbitDot} />
-                <span className={styles.floatingMark}>
-                  <Sparkles size={16} />
-                </span>
-                <span className={styles.orbitLabel}>FIND YOUR FOCUS</span>
-              </div>
-            </div>
-            <div className={styles.focusBottom}>
-              <button
-                className={styles.focusCTA}
-                onClick={(event) => open(focus.id, event.currentTarget)}
-              >
-                Review this
-                <ArrowUpRight size={19} />
-              </button>
               <span>
-                <Sparkles size={13} />
-                Context already gathered
+                <strong>{priorityCounts.medium}</strong>Medium
+              </span>
+              <span>
+                <strong>{priorityCounts.low}</strong>Low
               </span>
             </div>
-          </article>
-          <aside className={styles.upNext}>
-            <div className={styles.upNextHeading}>
-              <h2>Then, these.</h2>
-              <span>{nextUp.length} up next</span>
+            <div className={dashboardStyles.nextHeading}>
+              <h3>Up next</h3>
+              <StatusPill>{nextUp.length} conversations</StatusPill>
             </div>
-            {nextUp.map((message, index) => {
-              const Icon = iconFor(message);
+            {nextUp.map((message) => {
               return (
                 <button
                   key={message.id}
+                  className={dashboardStyles.nextCard}
                   data-testid="message-row"
                   data-message-id={message.id}
-                  className={`${styles.nextCard} ${index === 1 ? styles.nextLavender : ''}`}
                   onClick={(event) => open(message.id, event.currentTarget)}
                 >
-                  <span className={styles.nextTop}>
-                    <span className={styles.nextIcon}>
-                      <Icon size={18} />
-                    </span>
-                    <span>{message.classification}</span>
-                    <span className={styles.nextNumber}>0{index + 2}</span>
+                  <span className={dashboardStyles.nextText}>
+                    <strong>{messagePreview(message.text, 74)}</strong>
+                    <small>
+                      <ClassificationPill classification={message.classification} />
+                    </small>
                   </span>
-                  <strong>{subject(message)}</strong>
-                  <span className={styles.nextBottom}>
-                    <span>#{message.channel.replace(/^#/, '')}</span>
-                    <ArrowUpRight size={17} />
-                  </span>
+                  <ArrowUpRight size={15} aria-hidden="true" />
                 </button>
               );
             })}
             {!nextUp.length && (
-              <div className={styles.breathingRoom}>
-                <Coffee size={30} />
-                <strong>One thing is enough.</strong>
-                <p>Take this conversation at your pace.</p>
-              </div>
+              <p className={dashboardStyles.noNext}>Your next priority will appear here.</p>
             )}
           </aside>
         </section>
@@ -416,7 +407,7 @@ export default function Inbox({
             <h2>You’ve made room.</h2>
             <p>
               {pending.length
-                ? 'Only informational messages remain below.'
+                ? 'Your remaining messages are grouped by type below.'
                 : 'No conversations waiting for review.'}
             </p>
           </div>
@@ -438,33 +429,33 @@ export default function Inbox({
           <span className={styles.reviewSummaryNote}>Progress, one conversation at a time.</span>
         </div>
       )}
-      <section className={styles.collection} aria-label="Message queue">
-        <div className={styles.collectionHeading}>
+      <section
+        className={reviewed ? styles.collection : dashboardStyles.collection}
+        aria-label="Message queue"
+      >
+        <div className={reviewed ? styles.collectionHeading : dashboardStyles.collectionHeading}>
           <div>
             <h2>
               {reviewed
                 ? 'Your recent calls.'
-                : focused
-                  ? 'Everything else.'
-                  : view === 'deferred'
-                    ? 'Ready when you are.'
-                    : 'Your conversations.'}
+                : view === 'deferred'
+                  ? 'Deferred conversations'
+                  : 'Conversations'}
             </h2>
-            {focused && <p>The important things come first. The rest stays within reach.</p>}
           </div>
           <button
             className={`${styles.toolsButton} ${toolsOpen ? styles.toolsActive : ''}`}
             onClick={() => setToolsOpen(!toolsOpen)}
+            aria-label="Search & filter"
             aria-expanded={toolsOpen}
             aria-controls="inbox-filters"
           >
             <Search size={16} />
             <span>Search & filter</span>
             {hasFilters && <i />}
-            <ListFilter size={15} />
           </button>
         </div>
-        <div className={styles.queueNavigation}>
+        <div className={reviewed ? styles.queueNavigation : dashboardStyles.queueNavigation}>
           <div className={styles.viewTabs} role="group" aria-label="Queue view">
             {reviewed ? (
               <span className={styles.reviewedLabel}>
@@ -489,7 +480,9 @@ export default function Inbox({
               ))
             )}
           </div>
-          <span className={styles.listCount}>{filtered.length} conversations</span>
+          <span className={styles.listCount}>
+            {rows.length} {focused ? 'remaining' : 'conversations'}
+          </span>
         </div>
         {(toolsOpen || hasFilters) && (
           <div id="inbox-filters" className={styles.filters}>
@@ -534,7 +527,9 @@ export default function Inbox({
             >
               <option value="all">All channels</option>
               {channels.map((c) => (
-                <option key={c}>{c}</option>
+                <option key={c.value} value={c.value}>
+                  #{c.label}
+                </option>
               ))}
             </select>
             <select
@@ -575,86 +570,66 @@ export default function Inbox({
             )}
           </div>
         )}
-        <div className={styles.conversations}>
-          {loading
-            ? Array.from({ length: 3 }, (_, i) => (
-                <div className={styles.loadingRow} key={i}>
-                  <div className="skeleton" />
-                </div>
-              ))
-            : rows.length
-              ? (focused && !showAllRemaining ? rows.slice(0, 4) : rows).map(renderRow)
-              : !focus && (
-                  <div className="empty-state">
-                    <span className="empty-icon">
-                      {hasFilters ? (
-                        <Search size={25} />
-                      ) : failed ? (
-                        <MessageCircle size={25} />
-                      ) : (
-                        <CheckCheck size={25} />
-                      )}
-                    </span>
-                    <h3>
-                      {hasFilters
-                        ? 'No matching conversations'
-                        : failed
-                          ? 'Messages are unavailable'
-                          : view === 'deferred'
-                            ? 'Nothing on hold'
-                            : reviewed
-                              ? 'Your next review starts the story'
-                              : 'All clear here.'}
-                    </h3>
-                    <p>
-                      {hasFilters
-                        ? 'Try another word or clear your filters.'
-                        : failed
-                          ? 'Use Retry above to reconnect.'
-                          : view === 'deferred'
-                            ? 'Conversations you defer will stay here.'
-                            : reviewed
-                              ? 'Your saved reviews will appear here.'
-                              : 'There’s nothing else waiting in this view.'}
-                    </p>
-                    {hasFilters && (
-                      <button className="btn" onClick={clear}>
-                        Clear filters
-                      </button>
-                    )}
+        {!reviewed && !loading && (rows.length > 0 || (!failed && focused && !hasFilters)) ? (
+          <MessageGroups
+            key={view}
+            messages={rows}
+            category={params.get('signal') || 'all'}
+            priority={params.get('urgency') || 'all'}
+            onChange={filterSection}
+            onOpen={open}
+            compact={focused}
+          />
+        ) : (
+          <div className={styles.conversations}>
+            {loading
+              ? Array.from({ length: 3 }, (_, i) => (
+                  <div className={styles.loadingRow} key={i}>
+                    <div className="skeleton" />
                   </div>
-                )}
-        </div>
-        {focused && rows.length > 4 && (
-          <button
-            className={styles.showMore}
-            onClick={() => setShowAllRemaining(!showAllRemaining)}
-            aria-expanded={showAllRemaining}
-          >
-            {showAllRemaining ? 'Keep it focused' : `Show ${rows.length - 4} more conversations`}
-            <ChevronDown size={15} className={showAllRemaining ? styles.rotated : ''} />
-          </button>
-        )}
-        {!!quiet.length && (
-          <div className={styles.quietCorner}>
-            <button
-              className={styles.quietToggle}
-              onClick={() => setQuietOpen(!quietOpen)}
-              aria-expanded={quietOpen}
-            >
-              <span className={styles.quietIcon}>
-                <Moon size={18} />
-              </span>
-              <span>
-                <strong>Quiet corner</strong>
-                <small>
-                  {quiet.length} FYI {quiet.length === 1 ? 'message' : 'messages'}. Here if you need
-                  them.
-                </small>
-              </span>
-              <ChevronDown size={18} className={quietOpen ? styles.rotated : ''} />
-            </button>
-            {quietOpen && quiet.map(renderRow)}
+                ))
+              : rows.length
+                ? rows.map(renderRow)
+                : !focus && (
+                    <div className="empty-state">
+                      <span className="empty-icon">
+                        {hasFilters ? (
+                          <Search size={25} />
+                        ) : failed ? (
+                          <MessageCircle size={25} />
+                        ) : (
+                          <CheckCheck size={25} />
+                        )}
+                      </span>
+                      <h3>
+                        {hasFilters
+                          ? 'No matching conversations'
+                          : failed
+                            ? 'Messages are unavailable'
+                            : view === 'deferred'
+                              ? 'Nothing on hold'
+                              : reviewed
+                                ? 'Your next review starts the story'
+                                : 'All clear here.'}
+                      </h3>
+                      <p>
+                        {hasFilters
+                          ? 'Try another word or clear your filters.'
+                          : failed
+                            ? 'Use Retry above to reconnect.'
+                            : view === 'deferred'
+                              ? 'Conversations you defer will stay here.'
+                              : reviewed
+                                ? 'Your saved reviews will appear here.'
+                                : 'There’s nothing else waiting in this view.'}
+                      </p>
+                      {hasFilters && (
+                        <button className="btn" onClick={clear}>
+                          Clear filters
+                        </button>
+                      )}
+                    </div>
+                  )}
           </div>
         )}
         {view === 'deferred' && (
@@ -664,18 +639,20 @@ export default function Inbox({
           </p>
         )}
       </section>
-      <div className={styles.focusNote}>
-        <span>
-          <Sparkles size={13} />
-          {reviewed
-            ? 'Your latest reviews, kept together.'
-            : 'Ranked by urgency and actionability.'}
-        </span>
-        <span>
-          {messages.length} conversations in this workspace
-          <ArrowDown size={12} />
-        </span>
-      </div>
+      {reviewed && (
+        <div className={styles.focusNote}>
+          <span>
+            <Sparkles size={13} />
+            {reviewed
+              ? 'Your latest reviews, kept together.'
+              : 'Ranked by urgency and actionability.'}
+          </span>
+          <span>
+            {messages.length} conversations in this workspace
+            <ArrowDown size={12} />
+          </span>
+        </div>
+      )}
       <Dialog.Root
         open={Boolean(selectedId)}
         onOpenChange={(value) => {

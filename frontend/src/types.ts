@@ -32,7 +32,9 @@ export interface Message {
   id: string;
   text: string;
   sender: string;
+  sender_name?: string;
   channel: string;
+  channel_name?: string;
   created_at: string;
   decided_at?: string | null;
   priority: 'high' | 'medium' | 'low';
@@ -58,7 +60,9 @@ export interface Message {
       id: string;
       text: string;
       sender: string;
+      sender_name?: string;
       channel: string;
+      channel_name?: string;
       relationship?: string;
     }[];
   };
@@ -95,6 +99,7 @@ export interface Observability {
   recent_runs: {
     run_id: string;
     channel?: string;
+    channel_name?: string;
     classification?: string;
     status: string;
     duration_ms?: number;

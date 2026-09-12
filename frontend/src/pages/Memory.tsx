@@ -1,4 +1,7 @@
-﻿import { useMemo, useState } from 'react';
+import { channelName, channelOptions } from '../slackIdentity';
+import SlackSource from '../components/SlackSource';
+import StatusPill, { ConfidencePill } from '../components/StatusPill';
+import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -11,10 +14,10 @@ import {
   ChevronDown,
   CircleAlert,
   Database,
-  Hash,
   RefreshCw,
   Search,
   Sparkles,
+  UserRound,
   Users,
   X,
 } from 'lucide-react';
@@ -37,15 +40,6 @@ function sourceId(metadata?: Record<string, unknown>) {
   if (Array.isArray(ids) && typeof ids[0] === 'string') return ids[0];
   return undefined;
 }
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((part) => part[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-}
-
 export default function Memory({
   messages,
   loading = false,
@@ -95,7 +89,7 @@ export default function Memory({
     }
     return [...unique.values()];
   }, [messages]);
-  const channels = [...new Set(decisions.map((item) => item.message.channel))].sort();
+  const channels = channelOptions(decisions.map((item) => item.message));
   const visible = decisions.filter((item) => channel === 'all' || item.message.channel === channel);
   const pending = messages.filter(
     (message) =>
@@ -123,7 +117,7 @@ export default function Memory({
     <div className={styles.page}>
       <header className={styles.pageIntro}>
         <div>
-          <p className="eyebrow">LESS “DIDN'T WE ALREADY DISCUSS THIS?”</p>
+          <p className="eyebrow">DECISIONS FROM YOUR SLACK CONVERSATIONS</p>
           <h1>
             Decision memory
             <span className={styles.headingDot} aria-hidden="true">
@@ -271,32 +265,41 @@ export default function Memory({
                     <div className={styles.cardMeta}>
                       <Sparkles size={17} aria-hidden="true" />
                       <strong>From your decision records</strong>
-                      <span className={styles.provider}>
+                      <StatusPill tone="memory" icon={Database} className={styles.provider}>
                         {search.data.provider === 'local'
                           ? 'Local search'
                           : search.data.provider === 'mem0'
                             ? 'Memory search'
                             : search.data.provider}
-                      </span>
+                      </StatusPill>
                     </div>
                     <p>{search.data.answer}</p>
                   </div>
                 )}
                 <div className={styles.sectionHeading}>
                   <h3>Supporting records</h3>
-                  <span className="muted">
+                  <StatusPill tone="memory" icon={BookOpen}>
                     {search.data.matches.length}{' '}
                     {search.data.matches.length === 1 ? 'match' : 'matches'}
-                  </span>
+                  </StatusPill>
                 </div>
                 <div className={styles.evidenceGrid}>
                   {search.data.matches.map((match, index) => {
                     const id = sourceId(match.metadata);
                     const source = messages.find((message) => message.id === id);
-                    const matchChannel =
+                    const rawChannel =
                       typeof match.metadata?.channel === 'string'
                         ? match.metadata.channel
                         : source?.channel;
+                    const matchChannel = channelName({
+                      channel: rawChannel,
+                      channel_name:
+                        typeof match.metadata?.channel_name === 'string'
+                          ? match.metadata.channel_name
+                          : rawChannel === source?.channel
+                            ? source?.channel_name
+                            : undefined,
+                    });
                     return (
                       <article
                         key={`${match.id || 'match'}-${index}`}
@@ -304,11 +307,17 @@ export default function Memory({
                       >
                         <div className={styles.cardMeta}>
                           <span className={styles.recordNumber}>{index + 1}</span>
-                          <span>
-                            {matchChannel ? `#${matchChannel.replace(/^#/, '')}` : 'Saved decision'}
-                          </span>
+                          {matchChannel ? (
+                            <SlackSource channel={matchChannel} />
+                          ) : (
+                            <StatusPill tone="memory" icon={BookOpen}>
+                              Saved decision
+                            </StatusPill>
+                          )}
                           {match.created_at && (
-                            <time dateTime={match.created_at}>{dateLabel(match.created_at)}</time>
+                            <StatusPill icon={CalendarDays}>
+                              <time dateTime={match.created_at}>{dateLabel(match.created_at)}</time>
+                            </StatusPill>
                           )}
                         </div>
                         <p className={styles.memoryText}>{match.memory}</p>
@@ -353,8 +362,8 @@ export default function Memory({
               >
                 <option value="all">All channels</option>
                 {channels.map((value) => (
-                  <option key={value} value={value}>
-                    #{value.replace(/^#/, '')}
+                  <option key={value.value} value={value.value}>
+                    #{value.label}
                   </option>
                 ))}
               </select>
@@ -387,43 +396,33 @@ export default function Memory({
               >
                 <div className={styles.decisionTop}>
                   <span className={styles.decisionMark} aria-hidden="true">
-                    <Check size={21} />
+                    <BookOpen size={21} />
                   </span>
-                  <span className={styles.channelLabel}>
-                    <Hash size={13} aria-hidden="true" />
-                    {decision.message.channel.replace(/^#/, '')}
-                  </span>
+                  <SlackSource channel={channelName(decision.message)} />
                   <span className={styles.decisionIndex} aria-hidden="true">
                     {String(index + 1).padStart(2, '0')}
                   </span>
                 </div>
                 <h3>{decision.decision}</h3>
                 <div className={styles.decisionMeta}>
-                  <span>
-                    <CalendarDays size={14} aria-hidden="true" />
-                    {dateLabel(decision.date)}
-                  </span>
+                  <StatusPill icon={CalendarDays}>{dateLabel(decision.date)}</StatusPill>
+                  {decision.confidence && <ConfidencePill confidence={decision.confidence} />}
                   {!!decision.participants?.length && (
-                    <span
-                      className={styles.participantStack}
+                    <div
+                      className={styles.participantPills}
                       aria-label={`Participants: ${decision.participants.join(', ')}`}
                     >
-                      {decision.participants.slice(0, 3).map((name, i) => (
-                        <span
-                          className={styles.avatar}
-                          key={`${name}-${i}`}
-                          title={name}
-                          aria-hidden="true"
-                        >
-                          {initials(name)}
-                        </span>
+                      {decision.participants.slice(0, 2).map((name, i) => (
+                        <StatusPill icon={UserRound} key={`${name}-${i}`} title={name}>
+                          {name}
+                        </StatusPill>
                       ))}
-                      {decision.participants.length > 3 && (
-                        <span className={styles.extraParticipants}>
-                          +{decision.participants.length - 3}
-                        </span>
+                      {decision.participants.length > 2 && (
+                        <StatusPill icon={Users} title={decision.participants.slice(2).join(', ')}>
+                          +{decision.participants.length - 2}
+                        </StatusPill>
                       )}
-                    </span>
+                    </div>
                   )}
                 </div>
                 <details className={styles.decisionDetails}>
@@ -447,21 +446,29 @@ export default function Memory({
                         </ul>
                       </>
                     )}
-                    <p className={styles.detailMeta}>
-                      <Users size={14} aria-hidden="true" />
-                      {decision.participants?.length
-                        ? decision.participants.join(', ')
-                        : 'Participants not identified'}
-                    </p>
-                    <p className={styles.detailMeta}>
-                      {decision.confidence
-                        ? `Extraction confidence: ${decision.confidence}`
-                        : 'Confidence unavailable'}
-                    </p>
+                    {decision.participants && decision.participants.length > 2 && (
+                      <div className={styles.participantPills} aria-label="All participants">
+                        {decision.participants.map((name, i) => (
+                          <StatusPill icon={UserRound} key={`${name}-${i}`}>
+                            {name}
+                          </StatusPill>
+                        ))}
+                      </div>
+                    )}
+                    {(!decision.participants?.length || !decision.confidence) && (
+                      <div className={styles.metadataPills}>
+                        {!decision.participants?.length && (
+                          <StatusPill icon={Users}>Participants not identified</StatusPill>
+                        )}
+                        {!decision.confidence && <StatusPill>Confidence unavailable</StatusPill>}
+                      </div>
+                    )}
                   </div>
                 </details>
                 <footer className={styles.decisionFooter}>
-                  <span>Extracted decision</span>
+                  <StatusPill tone="memory" icon={Sparkles}>
+                    Extracted decision
+                  </StatusPill>
                   <Link
                     className={styles.sourceLink}
                     to={`/inbox?message=${encodeURIComponent(decision.message.id)}`}
@@ -488,7 +495,7 @@ export default function Memory({
         {decisions.length > 0 && (
           <p className={styles.collectionNote}>
             <Sparkles size={14} aria-hidden="true" />
-            From your loaded messages. Open a source to confirm the original context.
+            From your loaded Slack messages. Open a source to confirm the original context.
           </p>
         )}
       </section>
@@ -517,8 +524,11 @@ export default function Memory({
                   to={`/inbox?message=${encodeURIComponent(message.id)}`}
                 >
                   <div>
-                    <span className={styles.channelLabel}>
-                      Decision requested · #{message.channel.replace(/^#/, '')}
+                    <span className={styles.metadataPills}>
+                      <StatusPill tone="memory" icon={BookOpen}>
+                        Decision requested
+                      </StatusPill>
+                      <SlackSource channel={channelName(message)} />
                     </span>
                     <p>{message.text}</p>
                   </div>
