@@ -18,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api } from './api';
+import { api, readCachedMessages } from './api';
 import Inbox from './pages/Inbox';
 import ActionItems from './pages/ActionItems';
 import Memory from './pages/Memory';
@@ -39,9 +39,11 @@ export default function App() {
       return 'comfortable';
     }
   });
+  const [cachedMessages] = useState(readCachedMessages);
   const messages = useQuery({
     queryKey: ['messages'],
     queryFn: api.messages,
+    initialData: cachedMessages,
     refetchInterval: __LIVE_PREVIEW__ ? 15_000 : false,
     refetchOnWindowFocus: __LIVE_PREVIEW__,
   });
@@ -52,6 +54,11 @@ export default function App() {
     refetchOnWindowFocus: __LIVE_PREVIEW__,
   });
   const allMessages = messages.data?.messages ?? [];
+  const usingCachedMessages = messages.data?.fromCache === true;
+  const cachedAtDate = messages.data?.cachedAt ? new Date(messages.data.cachedAt) : undefined;
+  const cachedAtText = cachedAtDate && !Number.isNaN(cachedAtDate.getTime())
+    ? cachedAtDate.toLocaleString()
+    : 'the last successful connection';
   const pending = allMessages.filter((m) => !m.decision).length;
   const notify = (text: string) => setToast(text);
   const sync = useMutation({
@@ -289,9 +296,13 @@ export default function App() {
         </Dialog.Portal>
       </Dialog.Root>
       <main id="main-content" tabIndex={-1}>
-        {messages.isError && (
-          <div className="error-banner" role="alert">
-            <span>We couldn’t load your messages. {messages.error.message}</span>
+        {(messages.isError || usingCachedMessages) && (
+          <div className="error-banner" role={usingCachedMessages ? 'status' : 'alert'}>
+            <span>
+              {usingCachedMessages
+                ? `Backend unavailable. Showing ${allMessages.length} cached messages from ${cachedAtText}.`
+                : `We couldn’t load your messages. ${messages.error?.message ?? 'Please try again.'}`}
+            </span>
             <button className="btn" onClick={() => void messages.refetch()}>
               Retry
             </button>
