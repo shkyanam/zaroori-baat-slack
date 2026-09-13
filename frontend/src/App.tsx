@@ -55,6 +55,7 @@ export default function App() {
   });
   const allMessages = messages.data?.messages ?? [];
   const usingCachedMessages = messages.data?.fromCache === true;
+  const showingDemoMessage = messages.data?.isDemo === true;
   const cachedAtDate = messages.data?.cachedAt ? new Date(messages.data.cachedAt) : undefined;
   const cachedAtText = cachedAtDate && !Number.isNaN(cachedAtDate.getTime())
     ? cachedAtDate.toLocaleString()
@@ -296,10 +297,12 @@ export default function App() {
         </Dialog.Portal>
       </Dialog.Root>
       <main id="main-content" tabIndex={-1}>
-        {(messages.isError || usingCachedMessages) && (
-          <div className="error-banner" role={usingCachedMessages ? 'status' : 'alert'}>
+        {(messages.isError || usingCachedMessages || showingDemoMessage) && (
+          <div className="error-banner" role={messages.isError ? 'alert' : 'status'}>
             <span>
-              {usingCachedMessages
+              {showingDemoMessage
+                ? 'Showing a demo message. Connect Slack to load real conversations.'
+                : usingCachedMessages
                 ? `Backend unavailable. Showing ${allMessages.length} cached messages from ${cachedAtText}.`
                 : `We couldn’t load your messages. ${messages.error?.message ?? 'Please try again.'}`}
             </span>

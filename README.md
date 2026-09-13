@@ -55,6 +55,8 @@ The frontend API base is a build-time setting. If the backend URL changes, rebui
 
 The UI caches the last successfully loaded message list in the browser. If the backend becomes unavailable, that browser can still show the cached messages with a stale-data notice; syncs, reviews, and first-time loads still require the backend. The cache is local to each browser/device and is removed when its site data is cleared.
 
+When neither cached nor backend messages are available, the UI shows one clearly labeled, non-sensitive demo message so the hosted homepage is not blank. It is not a Slack message.
+
 The `start_local.sh` convenience script starts the application and ngrok from
 the project directory:
 

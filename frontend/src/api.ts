@@ -7,6 +7,26 @@ export type MessagesResponse = {
   messages: Message[];
   cachedAt?: string;
   fromCache?: boolean;
+  isDemo?: boolean;
+};
+
+const DEMO_MESSAGE: Message = {
+  id: 'demo-home-message',
+  text: 'Demo preview: connect Slack to load your conversations.',
+  sender: 'Zaroori Baat',
+  sender_name: 'Zaroori Baat',
+  channel: 'demo',
+  channel_name: 'Demo',
+  created_at: new Date().toISOString(),
+  priority: 'low',
+  classification: 'FYI',
+  score: 10,
+  reason: 'This is a non-sensitive preview message shown when no backend data is available.',
+  suggested_action: 'Connect Slack to begin reviewing conversations',
+  decision: null,
+  context: {},
+  action_extraction: {},
+  decision_memory: {},
 };
 
 export function readCachedMessages(): MessagesResponse | undefined {
@@ -54,11 +74,12 @@ export const api = {
   messages: async (): Promise<MessagesResponse> => {
     try {
       const response = await request<{ messages: Message[] }>('/api/messages');
+      if (!response.messages.length) return { messages: [DEMO_MESSAGE], isDemo: true };
       return { ...response, cachedAt: cacheMessages(response.messages), fromCache: false };
-    } catch (error) {
+    } catch {
       const cached = readCachedMessages();
       if (cached) return cached;
-      throw error;
+      return { messages: [DEMO_MESSAGE], isDemo: true };
     }
   },
   system: () => request<SystemStatus>('/api/system/status'),
