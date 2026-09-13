@@ -52,7 +52,12 @@ if not DATABASE_PATH.is_absolute():
     DATABASE_PATH = ROOT / DATABASE_PATH
 SEED_DEMO = os.environ.get("ZAROORI_BAAT_SEED_DEMO", "true").lower() in {"1", "true", "yes", "on"}
 HOST = os.environ.get("ZAROORI_BAAT_SLACK_HOST", "127.0.0.1")
-PORT = int(os.environ.get("ZAROORI_BAAT_SLACK_PORT", "8001"))
+PORT = int(os.environ.get("ZAROORI_BAAT_SLACK_PORT") or os.environ.get("PORT", "8001"))
+CORS_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("ZAROORI_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+}
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "").strip()
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
@@ -3095,16 +3100,31 @@ def seed_demo() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def send_cors_headers(self) -> None:
+        origin = self.headers.get("Origin", "").rstrip("/")
+        if origin and origin in CORS_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Vary", "Origin")
+
     def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def read_body(self) -> bytes:
         return self.rfile.read(int(self.headers.get("Content-Length", "0")))
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_cors_headers()
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802
         parsed_url = urlparse(self.path)

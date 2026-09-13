@@ -6,6 +6,8 @@ The React review workspace connects to the existing Python APIs and guides conve
 
 Zaroori Baat Slack scans incoming Slack message events, scores actionability, and ranks the messages most likely to need a response, owner, or decision.
 
+![Zaroori Baat Slack inbox overview](zaroori-baat-inbox-overview.png)
+
 ![Zaroori Baat Slack architecture](zaroori-baat-slack-architecture-workflow.png)
 
 ### Run locally
@@ -21,6 +23,29 @@ python3 app.py
 ```
 
 Open http://127.0.0.1:8001.
+
+### Host the UI separately
+
+The React UI can be deployed to any static host. Build it with the public base URL of the Python backend:
+
+```bash
+cd frontend
+VITE_API_BASE_URL=https://YOUR_BACKEND_HOST npm run build
+```
+
+Deploy the resulting `frontend/dist/` directory. The value must be the backend origin only—do not append `/api`, `/webhooks/slack`, a query string, or credentials. For example, if the backend is exposed through ngrok, use `https://YOUR_NGROK_HOST`; the frontend will call `/api/...` on that origin.
+
+For a separate UI origin, configure the backend with the exact UI origin before restarting it:
+
+```bash
+export ZAROORI_BAAT_SLACK_HOST=0.0.0.0
+export ZAROORI_CORS_ORIGINS=https://YOUR_UI_HOST
+python3 app.py
+```
+
+The backend must be reachable over HTTPS for a hosted UI. The current local SQLite database and LangGraph SQLite checkpoint files are not a permanent hosting solution: an always-on backend needs persistent storage, and the app should run with `ZAROORI_BAAT_SEED_DEMO=false`. Keep `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and any LLM, Mem0, or LangSmith keys in the hosting provider's secret settings, not in the frontend build or repository. Slack's Event Subscriptions Request URL remains `https://YOUR_BACKEND_HOST/webhooks/slack`.
+
+The frontend API base is a build-time setting. If the backend URL changes, rebuild and redeploy the UI with the new `VITE_API_BASE_URL` value.
 
 The `start_local.sh` convenience script starts the application and ngrok from
 the project directory:
