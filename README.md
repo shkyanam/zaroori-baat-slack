@@ -43,6 +43,8 @@ export ZAROORI_CORS_ORIGINS=https://YOUR_UI_HOST
 python3 app.py
 ```
 
+Security note: the current API has no user authentication. Do not expose it through a public ngrok URL or connect it to a public UI until you add authentication or restrict access at the hosting layer. The UI-only deployment is safe to use without this backend connection.
+
 The backend must be reachable over HTTPS for a hosted UI. The current local SQLite database and LangGraph SQLite checkpoint files are not a permanent hosting solution: an always-on backend needs persistent storage, and the app should run with `ZAROORI_BAAT_SEED_DEMO=false`. Keep `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and any LLM, Mem0, or LangSmith keys in the hosting provider's secret settings, not in the frontend build or repository. Slack's Event Subscriptions Request URL remains `https://YOUR_BACKEND_HOST/webhooks/slack`.
 
 The frontend API base is a build-time setting. If the backend URL changes, rebuild and redeploy the UI with the new `VITE_API_BASE_URL` value.
