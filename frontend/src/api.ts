@@ -5,6 +5,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  if (API_BASE_URL.includes('ngrok')) headers.set('ngrok-skip-browser-warning', '1');
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers,

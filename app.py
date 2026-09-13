@@ -3105,7 +3105,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin in CORS_ORIGINS:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, ngrok-skip-browser-warning")
             self.send_header("Access-Control-Max-Age", "600")
             self.send_header("Vary", "Origin")
 
