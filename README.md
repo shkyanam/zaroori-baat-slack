@@ -6,6 +6,10 @@ The React review workspace connects to the existing Python APIs and guides conve
 
 Zaroori Baat Slack scans incoming Slack message events, scores actionability, and ranks the messages most likely to need a response, owner, or decision.
 
+### Live UI
+
+Open the hosted workspace at [zaroori-baat-slack.vercel.app](https://zaroori-baat-slack.vercel.app/).
+
 ![Zaroori Baat Slack inbox overview](zaroori-baat-inbox-overview.png)
 
 ![Zaroori Baat Slack architecture](zaroori-baat-slack-architecture-workflow.png)
