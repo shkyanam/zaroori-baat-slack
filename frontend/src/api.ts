@@ -1,12 +1,9 @@
 import type { Message, MemoryResult, Observability, ReviewDecision, SystemStatus } from './types';
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/$/, '');
-const MESSAGE_CACHE_KEY = 'zb-messages-cache-v1';
 
 export type MessagesResponse = {
   messages: Message[];
-  cachedAt?: string;
-  fromCache?: boolean;
   isDemo?: boolean;
 };
 
@@ -29,34 +26,6 @@ const DEMO_MESSAGE: Message = {
   decision_memory: {},
 };
 
-export function readCachedMessages(): MessagesResponse | undefined {
-  if (typeof window === 'undefined') return undefined;
-  try {
-    const raw = window.localStorage.getItem(MESSAGE_CACHE_KEY);
-    if (!raw) return undefined;
-    const cached = JSON.parse(raw) as Partial<MessagesResponse>;
-    if (!Array.isArray(cached.messages)) return undefined;
-    return {
-      messages: cached.messages as Message[],
-      cachedAt: typeof cached.cachedAt === 'string' ? cached.cachedAt : undefined,
-      fromCache: true,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function cacheMessages(messages: Message[]): string | undefined {
-  if (typeof window === 'undefined') return undefined;
-  const cachedAt = new Date().toISOString();
-  try {
-    window.localStorage.setItem(MESSAGE_CACHE_KEY, JSON.stringify({ messages, cachedAt }));
-    return cachedAt;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -75,10 +44,8 @@ export const api = {
     try {
       const response = await request<{ messages: Message[] }>('/api/messages');
       if (!response.messages.length) return { messages: [DEMO_MESSAGE], isDemo: true };
-      return { ...response, cachedAt: cacheMessages(response.messages), fromCache: false };
+      return response;
     } catch {
-      const cached = readCachedMessages();
-      if (cached) return cached;
       return { messages: [DEMO_MESSAGE], isDemo: true };
     }
   },

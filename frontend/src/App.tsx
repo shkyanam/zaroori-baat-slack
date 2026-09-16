@@ -18,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { api, readCachedMessages } from './api';
+import { api } from './api';
 import Inbox from './pages/Inbox';
 import ActionItems from './pages/ActionItems';
 import Memory from './pages/Memory';
@@ -39,11 +39,9 @@ export default function App() {
       return 'comfortable';
     }
   });
-  const [cachedMessages] = useState(readCachedMessages);
   const messages = useQuery({
     queryKey: ['messages'],
     queryFn: api.messages,
-    initialData: cachedMessages,
     refetchInterval: __LIVE_PREVIEW__ ? 15_000 : false,
     refetchOnWindowFocus: __LIVE_PREVIEW__,
   });
@@ -54,12 +52,7 @@ export default function App() {
     refetchOnWindowFocus: __LIVE_PREVIEW__,
   });
   const allMessages = messages.data?.messages ?? [];
-  const usingCachedMessages = messages.data?.fromCache === true;
   const showingDemoMessage = messages.data?.isDemo === true;
-  const cachedAtDate = messages.data?.cachedAt ? new Date(messages.data.cachedAt) : undefined;
-  const cachedAtText = cachedAtDate && !Number.isNaN(cachedAtDate.getTime())
-    ? cachedAtDate.toLocaleString()
-    : 'the last successful connection';
   const pending = allMessages.filter((m) => !m.decision).length;
   const notify = (text: string) => setToast(text);
   const sync = useMutation({
@@ -297,13 +290,11 @@ export default function App() {
         </Dialog.Portal>
       </Dialog.Root>
       <main id="main-content" tabIndex={-1}>
-        {(messages.isError || usingCachedMessages || showingDemoMessage) && (
+        {(messages.isError || showingDemoMessage) && (
           <div className="error-banner" role={messages.isError ? 'alert' : 'status'}>
             <span>
               {showingDemoMessage
-                ? 'Showing a demo message. Connect Slack to load real conversations.'
-                : usingCachedMessages
-                ? `Backend unavailable. Showing ${allMessages.length} cached messages from ${cachedAtText}.`
+                ? 'Backend unavailable. Showing a demo message. Retry when the backend is running to load real conversations.'
                 : `We couldn’t load your messages. ${messages.error?.message ?? 'Please try again.'}`}
             </span>
             <button className="btn" onClick={() => void messages.refetch()}>
