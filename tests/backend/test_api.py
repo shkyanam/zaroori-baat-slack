@@ -252,6 +252,37 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.json_request("GET", "/api/decision-memory/search?q=Atlas")[1]["matches"]), 1)
         self.network.assert_not_called()
 
+    def test_fallback_captures_taken_decision_without_copying_related_decisions(self):
+        app.create_message("We decided to use SQLite for the local pilot.", channel="#engineering")
+        message = app.create_message(
+            "A decision has been taken to use Vercel to provide a publicly accessible link for the application.",
+            channel="#mastering-agentic-ai",
+        )
+
+        decisions = message["decision_memory"]["items"]
+        self.assertEqual(len(decisions), 1)
+        self.assertIn("use Vercel", decisions[0]["decision"])
+        self.assertEqual(decisions[0]["source_message_ids"], [message["id"]])
+
+        status, result = self.json_request("GET", "/api/decision-memory/search?q=Why%20are%20we%20using%20Vercel%3F")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(result["matches"]), 1)
+        self.assertIn("Vercel", result["matches"][0]["memory"])
+        self.network.assert_not_called()
+
+        with patch.multiple(app, MEM0_ENABLED=True, MEM0_API_KEY="configured"):
+            with patch.object(
+                app,
+                "call_mem0_json",
+                return_value={"results": [{"id": "remote-1", "memory": "An unrelated release decision"}]},
+            ):
+                status, result = self.json_request(
+                    "GET", "/api/decision-memory/search?q=Why%20are%20we%20using%20Vercel%3F"
+                )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["provider"], "local")
+        self.assertIn("Vercel", result["matches"][0]["memory"])
+
 
 class DemoSeedTests(unittest.TestCase):
     def test_offline_seed_is_additive_covers_categories_and_preserves_reviews(self):

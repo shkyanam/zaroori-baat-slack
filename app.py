@@ -462,7 +462,8 @@ INCIDENT_TERMS = re.compile(
 DECISION_TERMS = re.compile(r"\b(decision|decide|choose|choice|select|pick|recommendation|vote)\b", re.I)
 DECISION_MADE_LANGUAGE = re.compile(
     r"\b(?:let(?:'s| us)\s+(?:use|go with|choose|select)|go with|we\s+(?:decided|agreed)|"
-    r"decision\s*(?:is|:)|(?:use|choose|select|picked|selected|chose)\b.+?\b(?:instead of|rather than|over)\b|"
+    r"decision\s*(?:is|:)|(?:a\s+)?decision\s+(?:(?:has\s+been|was)\s+)?(?:made|taken)(?:\s+to)?|"
+    r"(?:use|choose|select|picked|selected|chose)\b.+?\b(?:instead of|rather than|over)\b|"
     r"(?:we\s+)?(?:picked|selected|chose)\s+)",
     re.I,
 )
@@ -1024,10 +1025,17 @@ def build_fallback_decision_memory(
     message_created_at: str | None = None,
 ) -> dict[str, Any]:
     """Capture obvious made decisions locally when the decision agent is unavailable."""
-    message_parts = [{"id": current_message_id, "text": text}] + [
-        {"id": related.get("id"), "text": str(related.get("text", ""))}
-        for related in related_messages
-    ]
+    # Only combine related evidence when Slack identifies the messages as
+    # belonging to the same thread. Lexical topic matches can be useful for
+    # context enrichment, but they are too broad to safely create a decision
+    # record for the current message.
+    message_parts = [{"id": current_message_id, "text": text}]
+    if thread_ts:
+        message_parts.extend(
+            {"id": related.get("id"), "text": str(related.get("text", ""))}
+            for related in related_messages
+            if related.get("relationship") == "Same Slack thread"
+        )
     sentences = [
         (part, sentence.strip())
         for part in message_parts
@@ -1067,7 +1075,8 @@ def build_fallback_decision_memory(
             alternative = comparison.group(2).strip()
         else:
             decision_match = re.search(
-                r"\b(?:decision\s*(?:is|:)|we\s+(?:decided|agreed)\s+(?:to\s+)?|(?:we\s+)?(?:picked|selected|chose)\s+)(.+?)(?:[.!?]|$)",
+                r"\b(?:decision\s*(?:is|:)|(?:a\s+)?decision\s+(?:(?:has\s+been|was)\s+)?(?:made|taken)(?:\s+to)?|"
+                r"we\s+(?:decided|agreed)\s+(?:to\s+)?|(?:we\s+)?(?:picked|selected|chose)\s+)(.+?)(?:[.!?]|$)",
                 sentence,
                 re.I,
             )
@@ -1409,7 +1418,10 @@ def normalize_mem0_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
-    ignored = STOP_WORDS | {"we", "did", "do", "what", "decide", "decision", "team", "memory"}
+    ignored = STOP_WORDS | {
+        "we", "did", "do", "what", "why", "how", "when", "where", "which", "who",
+        "are", "is", "was", "were", "using", "used", "decide", "decision", "team", "memory",
+    }
     query_terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2 and term not in ignored}
     with connection() as database:
         rows = database.execute(
@@ -1505,6 +1517,7 @@ def search_decision_memories(query: str) -> dict[str, Any]:
     provider = "local"
     status = "disabled" if not (MEM0_ENABLED and MEM0_API_KEY) else "fallback"
     matches: list[dict[str, Any]] = []
+    mem0_result_available = False
     if MEM0_ENABLED and MEM0_API_KEY:
         result = call_mem0_json(
             "/v3/memories/search/",
@@ -1519,21 +1532,24 @@ def search_decision_memories(query: str) -> dict[str, Any]:
             },
         )
         if result is not None:
+            mem0_result_available = True
             provider = "mem0"
             status = "complete"
             matches = normalize_mem0_results(result)
-    if not matches:
-        local_matches = local_decision_memory_search(query)
-        if provider == "mem0" and not local_matches:
-            status = "complete"
-        elif provider != "mem0":
-            matches = local_matches
-        else:
-            matches = local_matches
-            status = "mem0_empty_local_fallback"
+    local_matches = local_decision_memory_search(query)
+    if local_matches:
+        # Local records are the source of truth for decisions processed by
+        # this backend. Prefer them over broad semantic matches from Mem0 so a
+        # stale or loosely related remote result cannot hide an exact local
+        # decision, especially before deferred Mem0 storage completes.
+        matches = local_matches
+        provider = "local"
+        status = "local_preferred" if mem0_result_available else status
+    elif not mem0_result_available:
+        matches = []
     matches = with_slack_identity_names(matches)
     answer = call_llm_decision_memory_answer(query, matches)
-    if answer is None:
+    if answer is None or (matches and answer.lower().startswith("no matching")):
         answer = (
             "No matching stored decision was found."
             if not matches
@@ -1947,7 +1963,15 @@ def initialize_database() -> None:
                 )
             else:
                 database.execute("UPDATE messages SET classification = ? WHERE id = ?", (classification, row[0]))
-            if not row[7] or row[7] == "{}":
+            try:
+                existing_decision_memory = json.loads(row[7] or "{}")
+            except json.JSONDecodeError:
+                existing_decision_memory = {}
+            if (
+                not row[7]
+                or row[7] == "{}"
+                or (isinstance(existing_decision_memory, dict) and existing_decision_memory.get("agent") == "mock")
+            ):
                 fallback_decisions = build_fallback_decision_memory(
                     row[1],
                     row[3],
@@ -1956,6 +1980,9 @@ def initialize_database() -> None:
                     row[0],
                     row[8],
                 )
+                previous_store = existing_decision_memory.get("memory_store") if isinstance(existing_decision_memory, dict) else None
+                if isinstance(previous_store, dict):
+                    fallback_decisions["memory_store"] = previous_store
                 database.execute(
                     "UPDATE messages SET decision_memory_json = ? WHERE id = ?",
                     (json.dumps(fallback_decisions), row[0]),
