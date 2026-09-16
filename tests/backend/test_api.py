@@ -258,11 +258,19 @@ class ApiIntegrationTests(unittest.TestCase):
             "A decision has been taken to use Vercel to provide a publicly accessible link for the application.",
             channel="#mastering-agentic-ai",
         )
+        subject_first = app.create_message(
+            "Meta has taken decision to delay shipping Muse for several months to focus on safety and security.",
+            channel="#product-security",
+        )
 
         decisions = message["decision_memory"]["items"]
         self.assertEqual(len(decisions), 1)
         self.assertIn("use Vercel", decisions[0]["decision"])
         self.assertEqual(decisions[0]["source_message_ids"], [message["id"]])
+        subject_first_decisions = subject_first["decision_memory"]["items"]
+        self.assertEqual(len(subject_first_decisions), 1)
+        self.assertIn("delay shipping Muse", subject_first_decisions[0]["decision"])
+        self.assertEqual(subject_first_decisions[0]["source_message_ids"], [subject_first["id"]])
 
         status, result = self.json_request("GET", "/api/decision-memory/search?q=Why%20are%20we%20using%20Vercel%3F")
         self.assertEqual(status, 200)

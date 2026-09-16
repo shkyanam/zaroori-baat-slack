@@ -465,6 +465,7 @@ DECISION_TERMS = re.compile(r"\b(decision|decide|choose|choice|select|pick|recom
 DECISION_MADE_LANGUAGE = re.compile(
     r"\b(?:let(?:'s| us)\s+(?:use|go with|choose|select)|go with|we\s+(?:decided|agreed)|"
     r"decision\s*(?:is|:)|(?:a\s+)?decision\s+(?:(?:has\s+been|was)\s+)?(?:made|taken)(?:\s+to)?|"
+    r"(?:[\w'-]+\s+)?(?:has|have)\s+(?:made|taken)\s+(?:a\s+)?decision(?:\s+to)?|"
     r"(?:use|choose|select|picked|selected|chose)\b.+?\b(?:instead of|rather than|over)\b|"
     r"(?:we\s+)?(?:picked|selected|chose)\s+)",
     re.I,
@@ -1111,6 +1112,7 @@ def build_fallback_decision_memory(
         else:
             decision_match = re.search(
                 r"\b(?:decision\s*(?:is|:)|(?:a\s+)?decision\s+(?:(?:has\s+been|was)\s+)?(?:made|taken)(?:\s+to)?|"
+                r"(?:[\w'-]+\s+)?(?:has|have)\s+(?:made|taken)\s+(?:a\s+)?decision(?:\s+to)?|"
                 r"we\s+(?:decided|agreed)\s+(?:to\s+)?|(?:we\s+)?(?:picked|selected|chose)\s+)(.+?)(?:[.!?]|$)",
                 sentence,
                 re.I,
@@ -1159,7 +1161,7 @@ def call_llm_decision_memory_agent(
     }
     instructions = (
         "You are a Decision Memory Agent for Slack. Extract decisions that were actually made, not open questions or suggestions. "
-        "Recognize statements such as 'Let's use A instead of B', 'we decided...', 'we agreed to...', 'selected A', or 'decision is A'. "
+        "Recognize statements such as 'Let's use A instead of B', 'we decided...', 'we agreed to...', 'Meta has taken decision to do A', 'selected A', or 'decision is A'. "
         "Combine fragments across the supplied Slack messages when they belong to the same discussion. Use only the supplied evidence. "
         "Do not invent participants, alternatives, dates, or reasons. If no decision was made, return {\"decisions\":[]}. "
         "Return only JSON with this shape: {\"decisions\":[{\"decision\":\"...\","
