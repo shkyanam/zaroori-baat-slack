@@ -95,6 +95,7 @@ MEM0_BASE_URL = os.environ.get("MEM0_BASE_URL", "https://api.mem0.ai")
 MEM0_USER_ID = os.environ.get("MEM0_USER_ID", "zaroori-baat-workspace")
 MEM0_ENABLED = os.environ.get("MEM0_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 MEM0_MAX_RESULTS = int(os.environ.get("MEM0_MAX_RESULTS", "8"))
+MEM0_MIN_SCORE = float(os.environ.get("MEM0_MIN_SCORE", "0.75"))
 LANGGRAPH_CHECKPOINTER = os.environ.get("LANGGRAPH_CHECKPOINTER", "sqlite").lower()
 LANGGRAPH_CHECKPOINT_PATH = Path(
     os.environ.get("LANGGRAPH_CHECKPOINT_PATH", str(ROOT / "zaroori_baat_langgraph_checkpoints.sqlite3"))
@@ -483,6 +484,39 @@ STOP_WORDS = {
     "about", "after", "again", "also", "been", "before", "being", "could", "from", "have", "into",
     "just", "more", "need", "needs", "please", "that", "the", "their", "there", "this", "with", "would",
 }
+DECISION_MEMORY_IGNORED_TERMS = STOP_WORDS | {
+    "we", "did", "do", "what", "why", "how", "when", "where", "which", "who",
+    "are", "is", "was", "were", "using", "used", "decide", "decision", "team", "memory",
+}
+
+
+def canonical_decision_memory_term(value: str) -> str:
+    """Normalize common shorthand and typos without changing stored text."""
+    normalized = value.casefold()
+    return {"memo": "mem0"}.get(normalized, normalized)
+
+
+def decision_memory_terms(value: Any) -> set[str]:
+    return {
+        canonical_decision_memory_term(term)
+        for term in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if len(term) > 2 and term not in DECISION_MEMORY_IGNORED_TERMS
+    }
+
+
+def decision_memory_term_overlap(query_terms: set[str], candidate_terms: set[str]) -> int:
+    exact = query_terms & candidate_terms
+    matched = set(exact)
+    for query_term in query_terms - exact:
+        if len(query_term) < 5:
+            continue
+        if any(
+            abs(len(query_term) - len(candidate_term)) <= 2
+            and SequenceMatcher(None, query_term, candidate_term).ratio() >= 0.84
+            for candidate_term in candidate_terms
+        ):
+            matched.add(query_term)
+    return len(matched)
 
 
 def classify_message(text: str) -> str:
@@ -1418,26 +1452,34 @@ def normalize_mem0_results(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return matches[:MEM0_MAX_RESULTS]
 
 
-def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
-    ignored = STOP_WORDS | {
-        "we", "did", "do", "what", "why", "how", "when", "where", "which", "who",
-        "are", "is", "was", "were", "using", "used", "decide", "decision", "team", "memory",
-    }
-    query_terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2 and term not in ignored}
+def filter_relevant_mem0_results(query: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reject remote memories that are semantically loose or topic-free."""
+    query_terms = decision_memory_terms(query)
+    if not query_terms:
+        return []
 
-    def term_overlap(candidate_terms: set[str]) -> int:
-        exact = query_terms & candidate_terms
-        matched = set(exact)
-        for query_term in query_terms - exact:
-            if len(query_term) < 5:
-                continue
-            if any(
-                abs(len(query_term) - len(candidate_term)) <= 2
-                and SequenceMatcher(None, query_term, candidate_term).ratio() >= 0.84
-                for candidate_term in candidate_terms
-            ):
-                matched.add(query_term)
-        return len(matched)
+    relevant: list[dict[str, Any]] = []
+    for match in matches:
+        metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
+        searchable = " ".join(
+            [
+                str(match.get("memory") or ""),
+                json.dumps(metadata, sort_keys=True),
+            ]
+        )
+        overlap = decision_memory_term_overlap(query_terms, decision_memory_terms(searchable))
+        score = match.get("score")
+        high_confidence = isinstance(score, (int, float)) and not isinstance(score, bool) and score >= MEM0_MIN_SCORE
+        # A one-word topic query such as "Memo" must have an explicit topic
+        # match. For broader paraphrased questions, a genuinely high Mem0
+        # score can supplement lexical evidence.
+        if overlap or (len(query_terms) >= 2 and high_confidence):
+            relevant.append(match)
+    return relevant
+
+
+def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
+    query_terms = decision_memory_terms(query)
 
     with connection() as database:
         rows = database.execute(
@@ -1476,7 +1518,7 @@ def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
                 " ".join(source[3] for source in source_rows),
             ]
         ).lower()
-        overlap = term_overlap(set(re.findall(r"[a-z0-9]+", searchable)))
+        overlap = decision_memory_term_overlap(query_terms, decision_memory_terms(searchable))
         if query_terms and not overlap:
             continue
         channel = original[1] if original else ""
@@ -1551,7 +1593,9 @@ def search_decision_memories(query: str) -> dict[str, Any]:
             mem0_result_available = True
             provider = "mem0"
             status = "complete"
-            matches = normalize_mem0_results(result)
+            matches = filter_relevant_mem0_results(query, normalize_mem0_results(result))
+            if not matches:
+                status = "no_relevant_match"
     local_matches = local_decision_memory_search(query)
     if local_matches:
         # Local records are the source of truth for decisions processed by

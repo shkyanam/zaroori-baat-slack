@@ -291,6 +291,25 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertTrue(result["matches"])
         self.assertTrue(all("SQLite" in match["memory"] for match in result["matches"]))
 
+        with patch.multiple(app, MEM0_ENABLED=True, MEM0_API_KEY="configured"):
+            with patch.object(
+                app,
+                "call_mem0_json",
+                return_value={
+                    "results": [{
+                        "id": "remote-unrelated",
+                        "memory": "Decision to use design pattern A over design pattern B for the retry service.",
+                        "score": 0.91,
+                    }],
+                },
+            ):
+                status, result = self.json_request(
+                    "GET", "/api/decision-memory/search?q=Why%20Memo%20is%20used%3F"
+                )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["matches"], [])
+        self.assertEqual(result["answer"], "No matching stored decision was found.")
+
 
 class DemoSeedTests(unittest.TestCase):
     def test_offline_seed_is_additive_covers_categories_and_preserves_reviews(self):
