@@ -283,6 +283,14 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(result["provider"], "local")
         self.assertIn("Vercel", result["matches"][0]["memory"])
 
+        status, result = self.json_request(
+            "GET", "/api/decision-memory/search?q=Why%20are%20we%20using%20Sqllite%3F"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(result["provider"], "local")
+        self.assertTrue(result["matches"])
+        self.assertTrue(all("SQLite" in match["memory"] for match in result["matches"]))
+
 
 class DemoSeedTests(unittest.TestCase):
     def test_offline_seed_is_additive_covers_categories_and_preserves_reviews(self):

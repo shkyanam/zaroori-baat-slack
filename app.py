@@ -14,6 +14,7 @@ from contextlib import ExitStack, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1423,6 +1424,21 @@ def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
         "are", "is", "was", "were", "using", "used", "decide", "decision", "team", "memory",
     }
     query_terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2 and term not in ignored}
+
+    def term_overlap(candidate_terms: set[str]) -> int:
+        exact = query_terms & candidate_terms
+        matched = set(exact)
+        for query_term in query_terms - exact:
+            if len(query_term) < 5:
+                continue
+            if any(
+                abs(len(query_term) - len(candidate_term)) <= 2
+                and SequenceMatcher(None, query_term, candidate_term).ratio() >= 0.84
+                for candidate_term in candidate_terms
+            ):
+                matched.add(query_term)
+        return len(matched)
+
     with connection() as database:
         rows = database.execute(
             "SELECT id, channel, thread_ts, text, decision_memory_json, created_at FROM messages"
@@ -1460,7 +1476,7 @@ def local_decision_memory_search(query: str) -> list[dict[str, Any]]:
                 " ".join(source[3] for source in source_rows),
             ]
         ).lower()
-        overlap = len(query_terms & set(re.findall(r"[a-z0-9]+", searchable)))
+        overlap = term_overlap(set(re.findall(r"[a-z0-9]+", searchable)))
         if query_terms and not overlap:
             continue
         channel = original[1] if original else ""
